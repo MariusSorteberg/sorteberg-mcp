@@ -268,8 +268,10 @@ def _parse_author(header_value: str) -> Dict[str, str]:
     return {"name": header_value, "email": ""}
 
 
-def get_full_message(service, msg_id: str) -> Dict[str, Any]:
-    """Fetch a complete message with rich metadata, full body, links and author info."""
+def get_full_message(service, msg_id: str, max_body_chars: int = 15000) -> Dict[str, Any]:
+    """Fetch a complete message with rich metadata, full body, links and author info.
+    max_body_chars controls truncation of body_text (set high or 0 for full content when needed for specs/tables).
+    """
     msg_data = service.users().messages().get(
         userId="me", id=msg_id, format="full"
     ).execute()
@@ -301,30 +303,40 @@ def get_full_message(service, msg_id: str) -> Dict[str, Any]:
             _walk_parts(subpart)
     _walk_parts(msg_data.get("payload", {}))
 
+    if max_body_chars and max_body_chars > 0 and len(body_text) > max_body_chars:
+        truncated_body = body_text[:max_body_chars]
+        body_truncated = True
+    else:
+        truncated_body = body_text
+        body_truncated = False
+
     return {
         "id": msg_id,
         "threadId": msg_data.get("threadId"),
         "author": author,
         "subject": subject,
         "date": date,
-        "labels": [lbl.get("name") for lbl in msg_data.get("labelIds", []) if lbl],  # will be enriched later
-        "body_text": body_text[:15000] if body_text else "",  # truncate very long bodies
-        "body_truncated": len(body_text) > 15000 if body_text else False,
+        "labels": [lbl.get("name") for lbl in msg_data.get("labelIds", []) if lbl],
+        "body_text": truncated_body,
+        "body_truncated": body_truncated,
+        "body_length": len(body_text),
         "links": links,
         "attachments": attachments,
         "snippet": msg_data.get("snippet", ""),
     }
 
 
-def get_thread(service, thread_id: str, max_messages: int = 30) -> List[Dict[str, Any]]:
-    """Get the full thread (conversation) for context. Very useful for mailing lists."""
+def get_thread(service, thread_id: str, max_messages: int = 30, max_body_chars: int = 15000) -> List[Dict[str, Any]]:
+    """Get the full thread (conversation) for context. Very useful for mailing lists.
+    Pass a high max_body_chars (e.g. 200000) when you need complete long posts containing torque tables and detailed procedures.
+    """
     thread = service.users().threads().get(
         userId="me", id=thread_id, format="full"
     ).execute()
 
     messages = []
     for msg in thread.get("messages", [])[:max_messages]:
-        messages.append(get_full_message(service, msg["id"]))
+        messages.append(get_full_message(service, msg["id"], max_body_chars=max_body_chars))
     return messages
 
 
@@ -395,19 +407,44 @@ def get_attachment_content(service, message_id: str, attachment_id: str) -> Dict
 
 
 def fetch_url(url: str, max_chars: int = 12000) -> Dict[str, Any]:
-    """Fetch external content from a link found in the mailing list. Useful for manuals, photos descriptions, etc."""
+    """Fetch external content from a link found in the mailing list. Useful for manuals, photos descriptions, etc.
+    When the link is a PDF (common for factory torque specs and diagrams), performs text extraction.
+    """
     try:
         import httpx
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
             resp = client.get(url, headers={"User-Agent": "Sorteberg-MCP/1.0"})
             resp.raise_for_status()
-            content_type = resp.headers.get("content-type", "")
+            content_type = resp.headers.get("content-type", "") or ""
+            final_url = str(resp.url)
+
+            # Handle direct PDF links (very useful when experts share factory manuals or torque charts)
+            if "pdf" in content_type.lower() or final_url.lower().endswith(".pdf"):
+                try:
+                    from pypdf import PdfReader
+                    from io import BytesIO
+                    reader = PdfReader(BytesIO(resp.content))
+                    extracted = "\n".join(page.extract_text() or "" for page in reader.pages)
+                    text = extracted.strip()[:max_chars] if extracted else ""
+                    return {
+                        "url": final_url,
+                        "status_code": resp.status_code,
+                        "content_type": content_type,
+                        "is_pdf": True,
+                        "text": text,
+                        "truncated": len(extracted) > max_chars if extracted else False,
+                        "page_count": len(reader.pages),
+                    }
+                except Exception as pdf_err:
+                    logger.warning(f"PDF extraction via fetch_link failed for {url}: {pdf_err}")
+
+            # Normal text/HTML content
             text = resp.text[:max_chars] if resp.text else ""
             return {
-                "url": str(resp.url),
+                "url": final_url,
                 "status_code": resp.status_code,
                 "content_type": content_type,
-                "title": "",  # could parse <title> if html
+                "is_pdf": False,
                 "text": text,
                 "truncated": len(resp.text) > max_chars if resp.text else False,
             }
@@ -513,17 +550,23 @@ def search_mailing_list(
 
 @mcp.tool()
 def get_message(message_id: str, include_full_body: bool = True) -> Dict[str, Any]:
-    """Retrieve a single email with full body text, properly parsed author name, links, and attachments."""
+    """Retrieve a single email with full body text, properly parsed author name, links, and attachments.
+    Set include_full_body=True to retrieve the complete untruncated body (important for long expert posts with specifications and tables).
+    """
     service, owner = get_gmail_service()
-    msg = get_full_message(service, message_id)
+    max_chars = 0 if include_full_body else 15000   # 0 = no truncation
+    msg = get_full_message(service, message_id, max_body_chars=max_chars)
     return msg
 
 
 @mcp.tool()
-def get_thread(thread_id: str, max_messages: int = 25) -> List[Dict[str, Any]]:
-    """Get the full conversation thread. Essential for understanding complete advice that spans multiple replies."""
+def get_thread(thread_id: str, max_messages: int = 25, include_full_bodies: bool = False) -> List[Dict[str, Any]]:
+    """Get the full conversation thread. Essential for understanding complete advice that spans multiple replies.
+    Set include_full_bodies=True to avoid truncating long detailed posts (critical when experts discuss exact torque values, clearances and procedures in depth).
+    """
     service, owner = get_gmail_service()
-    return get_thread(service, thread_id, max_messages)
+    max_chars = 0 if include_full_bodies else 15000
+    return get_thread(service, thread_id, max_messages, max_body_chars=max_chars)
 
 
 @mcp.tool()
@@ -541,6 +584,37 @@ def get_attachment(message_id: str, attachment_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def get_thread_attachments(thread_id: str) -> Dict[str, Any]:
+    """Collect every attachment (photos, diagrams, PDF scans, torque charts, etc.) across an entire thread.
+    Returns them with message context (author, date, subject, message_id) so the expert can attribute figures and incorporate real pictures/diagrams into professional documentation.
+    This is the preferred tool when building richly illustrated guides (e.g. engine overhaul with measurement photos and factory-style diagrams).
+    """
+    service, owner = get_gmail_service()
+    # Use full bodies off to keep response reasonable, but we only need the attachment metadata list here
+    thread_messages = get_thread(service, thread_id, max_messages=40, max_body_chars=15000)
+    all_atts: List[Dict[str, Any]] = []
+    for msg in thread_messages:
+        for att in msg.get("attachments", []):
+            if att.get("attachmentId"):
+                all_atts.append({
+                    "message_id": msg["id"],
+                    "author": msg.get("author"),
+                    "date": msg.get("date"),
+                    "subject": msg.get("subject"),
+                    "filename": att.get("filename"),
+                    "mimeType": att.get("mimeType"),
+                    "size": att.get("size"),
+                    "attachmentId": att.get("attachmentId"),
+                })
+    return {
+        "thread_id": thread_id,
+        "attachment_count": len(all_atts),
+        "attachments": all_atts,
+        "note": "Use get_attachment(message_id, attachmentId) on the items you need. Images include base64 for vision use; PDFs include extracted text_content.",
+    }
+
+
+@mcp.tool()
 def extract_links(message_id: str) -> List[str]:
     """Extract all URLs mentioned in a message body (great for following manuals, photos, etc.)."""
     service, owner = get_gmail_service()
@@ -550,7 +624,9 @@ def extract_links(message_id: str) -> List[str]:
 
 @mcp.tool()
 def fetch_link(url: str, max_chars: int = 8000) -> Dict[str, Any]:
-    """Fetch content from a URL found in the mailing list (manuals, forum posts, images descriptions, etc.)."""
+    """Fetch content from a URL found in the mailing list (manuals, forum posts, images descriptions, etc.).
+    Automatically extracts readable text when the link points to a PDF (excellent for factory torque tables and diagram references shared by experts).
+    """
     return fetch_url(url, max_chars)
 
 
@@ -601,7 +677,8 @@ def get_expert_guidance(
                 if tid and tid not in seen_thread_ids:
                     seen_thread_ids.add(tid)
                     try:
-                        thread = get_thread(service, tid, max_messages=8)
+                        # Pull fuller bodies in the high-level guidance tool so specs and detailed procedures are not truncated
+                        thread = get_thread(service, tid, max_messages=10, max_body_chars=0)
                         if thread:
                             all_threads.append({
                                 "thread_id": tid,

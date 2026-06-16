@@ -20,7 +20,7 @@ Use the get_expert_guidance tool with:
 - label: "Merak Group"
 - max_threads: 6
 
-Then, using only the threads and messages returned, produce a complete, well-structured technical guide.
+Then, using only the threads and messages returned (and get_thread_attachments + get_attachment where visuals or PDFs are present, plus include_full_bodies where long detailed posts are involved), produce a complete, well-structured technical guide.
 
 Requirements:
 - Every major piece of advice, warning, or technique must be attributed to the person who posted it (use their name from the "author" field) and the approximate date.
@@ -107,12 +107,18 @@ Then use search_mailing_list with a broader query on the same topic to find othe
 Finally use get_thread on the most useful thread IDs from both searches and synthesize the best advice while noting where people disagreed.
 ```
 
-### Handling Attachments and Photos
+### Handling Attachments, Photos, and Diagrams (for professional manual-style output)
 
 ```text
-When you find messages that reference useful photos or diagrams, use list_attachments and get_attachment on them. 
-Describe what is visible in the attachments (or note that images are present and would benefit from vision analysis).
-Also extract any links using extract_links and fetch the content with fetch_link if they point to useful external resources.
+For any valuable thread, start by calling get_thread_attachments(thread_id). This efficiently returns every photo, diagram, PDF scan or chart from the whole discussion, with author attribution.
+
+Then selectively call get_attachment on the most relevant items:
+- Images: use the base64 data + vision for descriptions. Include proper Markdown figures with captions and source attribution.
+- PDFs: use the extracted text_content (often contains torque tables or figure references).
+
+For external links to factory manuals or torque charts, use extract_links + fetch_link (it now extracts text from PDFs).
+
+When long detailed posts contain the actual numbers, call get_message(..., include_full_body=True) or get_thread(..., include_full_bodies=True) so specifications are not truncated.
 ```
 
 ### Creating "Living Documents"

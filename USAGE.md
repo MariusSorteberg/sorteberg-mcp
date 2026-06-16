@@ -14,10 +14,11 @@ This document contains practical guidance and prompt patterns for getting the mo
 Once connected you should see tools including:
 - `search_mailing_list`
 - `get_expert_guidance`
-- `get_message`
-- `get_thread`
+- `get_message` (with `include_full_body=True` support)
+- `get_thread` (with `include_full_bodies=True` support)
 - `get_attachment`
-- `fetch_link`
+- `get_thread_attachments` (new — best for harvesting all diagrams/photos from a discussion)
+- `fetch_link` (now extracts PDFs too)
 - etc.
 
 ## Recommended Workflow for Generating How-Tos
@@ -52,7 +53,9 @@ Break it down manually:
 
 3. **Supporting materials**
    ```
-   For the messages that mention attachments or links, call list_attachments / get_attachment and extract_links / fetch_link as needed.
+   For richly illustrated guides, first call get_thread_attachments on the best thread_id(s).
+   Then selectively call get_attachment on the most useful image/PDF items.
+   Use extract_links + fetch_link (PDF-aware) for any external references.
    ```
 
 4. **Synthesis**
@@ -95,7 +98,7 @@ Create the guide in this structure:
 
 - Start broad with `get_expert_guidance`, then drill down with `get_thread` on the best hits.
 - When an expert is repeatedly mentioned positively, use `search_by_author` on them for a topic.
-- For visual procedures, explicitly ask Grok to note which messages have useful attachments or linked photos, then use `get_attachment` or `fetch_link`.
+- For visual procedures, use `get_thread_attachments(thread_id)` on promising threads to efficiently harvest all photos, diagrams and PDF references in one call. Follow up with `get_attachment` on the best ones (images return base64 suitable for vision).
 - Keep a running "sources" section. Ask Grok to maintain a list of message IDs or thread IDs used so you can go back and read the originals if needed.
 - If results feel thin, try slight variations of the topic wording — mailing list language is not always consistent ("engine rebuild" vs "bottom end overhaul" vs "full rebuild").
 

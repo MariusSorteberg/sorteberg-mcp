@@ -23,10 +23,11 @@ Tools are defined with the `@mcp.tool()` decorator. The server exposes them thro
 
 Key tools (as of latest version):
 - `search_mailing_list` — rich search with author, date, attachment filters.
-- `get_message` / `get_thread` — full content + context.
-- `get_attachment` — with PDF text extraction.
-- `fetch_link` — follow URLs mentioned in messages.
-- `get_expert_guidance` — high-level tool that performs smart multi-query search + thread fetching, optimized for generating how-to documents.
+- `get_message` / `get_thread` — full content + context. Support `include_full_body` / `include_full_bodies=True` to retrieve long untruncated posts containing detailed specifications and procedures.
+- `get_attachment` — with PDF text extraction (via pypdf). Images return base64 + metadata for vision use.
+- `get_thread_attachments(thread_id)` — new dedicated tool that harvests *all* attachments (photos, diagrams, PDF scans) across an entire thread with full author/message attribution. Critical for producing illustrated professional documentation.
+- `fetch_link` — follow URLs mentioned in messages. Now also extracts readable text from linked PDFs (factory manuals, torque charts, etc.).
+- `get_expert_guidance` — high-level tool that performs smart multi-query search + thread fetching (now with fuller bodies), optimized for generating how-to documents.
 - Plus supporting tools for authors, links, etc.
 
 All results are designed to be rich in attribution (author name/email, date, message/thread IDs, source label).
@@ -141,8 +142,8 @@ Once added, Grok will automatically probe the connector (using standard MCP disc
 After a successful connection, the following tools from your MCP become available for Grok to use automatically or on request:
 
 - `search_mailing_list` — for querying emails in your allowed labels with flexible filters.
-- `get_expert_guidance` — a specialized tool that retrieves enriched, expert-sourced discussions suitable for building how-tos.
-- Supporting tools such as `get_message`, `get_thread`, `list_attachments`, `get_attachment`, `extract_links`, `fetch_link`, `search_by_author`, and `list_labels`.
+- `get_expert_guidance` — a specialized tool that retrieves enriched, expert-sourced discussions suitable for building how-tos (pulls fuller bodies for specs).
+- Supporting tools such as `get_message` (with full-body option), `get_thread` (with full-bodies option), `list_attachments`, `get_attachment`, `get_thread_attachments` (new: all visuals from a thread), `extract_links`, `fetch_link` (now PDF-aware), `search_by_author`, and `list_labels`.
 
 Grok can call these tools in the background when you reference your connected data. For example, it might use `search_mailing_list` with a query focused on your "Merak Group" label, then follow up with `get_thread` or `get_expert_guidance` to gather full context and author-attributed advice.
 
@@ -185,8 +186,8 @@ This setup turns your unstructured email archives into a live, queryable knowled
 2. Grok decides to call `get_expert_guidance` (or a combination of `search_mailing_list` + `get_thread`).
 3. Request goes to the MCP server (authenticated with the bearer token obtained during connector setup).
 4. Server calls Gmail API (using the stored owner refresh token).
-5. Results are returned with full attribution.
-6. Grok synthesizes a high-quality, sourced document and presents it to the user.
+5. Results are returned with full attribution. For visual-rich or spec-heavy work, Grok will also call `get_thread_attachments`, `get_attachment` (for images/PDFs), and use full-body options.
+6. Grok synthesizes a high-quality, sourced document (with tables for every torque/clearance and guidance for incorporating real diagrams/photos) and presents it to the user.
 
 The AI never sees raw Gmail credentials or has unrestricted access.
 
@@ -206,9 +207,9 @@ The AI never sees raw Gmail credentials or has unrestricted access.
 
 ## Current Limitations & Future Ideas
 
-- Full email bodies and threads can get large — we truncate aggressively in some places.
+- Full email bodies and threads can get large — truncation is now controllable per call via `include_full_bodies=True` / `include_full_body=True` (and get_expert_guidance pulls fuller content). Very large threads may still need selective follow-up.
 - No semantic/vector search yet (keyword + Gmail search only).
-- Image attachments are returned as metadata only (vision can be done on the client side or via a future tool).
+- Image attachments return full base64 + metadata (vision works well client-side; no server-side description yet).
 - No write access to Gmail (by design).
 - No persistent indexing of the archive (every search hits Gmail API).
 

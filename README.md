@@ -28,12 +28,13 @@ Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, 
 
 - `list_labels` — See which labels are connected.
 - `search_mailing_list` — Advanced search (query, label, author, date range, has_attachments).
-- `get_message` — Full details of one email (body, author, links, attachments).
-- `get_thread` — Entire conversation thread for context.
-- `list_attachments` / `get_attachment` — Handle files attached to messages (PDF text extraction included).
-- `extract_links` / `fetch_link` — Pull and retrieve content from URLs discussed in the list.
+- `get_message` — Full details of one email. Supports `include_full_body=True` for long untruncated posts (essential for detailed specs).
+- `get_thread` — Entire conversation thread for context. Supports `include_full_bodies=True`.
+- `list_attachments` / `get_attachment` — Handle files attached to messages (PDF text extraction + image base64 for vision).
+- `get_thread_attachments(thread_id)` — **New**: Collects *all* photos, diagrams, and PDFs from an entire thread with author/message context. Ideal for richly illustrated guides.
+- `extract_links` / `fetch_link` — Pull and retrieve content from URLs. `fetch_link` now extracts text from PDF links (factory manuals, torque charts).
 - `search_by_author` — Find contributions from specific experts.
-- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search + thread enrichment with attribution.
+- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search + thread enrichment with attribution (now pulls fuller bodies).
 - `search_gmail` — Legacy compatibility wrapper.
 
 ## Setup & Deployment

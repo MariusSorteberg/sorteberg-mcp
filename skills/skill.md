@@ -41,11 +41,12 @@ Trigger phrase examples (you recognize these automatically):
 3. **Author focus** — when particular names appear repeatedly as trusted sources, use `search_by_author(author=..., label=...)` to surface more of their contributions.
 
 4. **Attachments and visuals** (critical for diagram/picture support)
-   - For any promising message, call `list_attachments(message_id)`.
-   - Then call `get_attachment(message_id, attachment_id)` for PDFs, photos, diagrams, or scans.
-     - PDFs: use the `text_content` (extracted via pypdf). Note any figure or page references.
-     - Images: the tool returns `is_image: true` + base64. In your output, provide clear insertion guidance (see Diagrams section below).
-   - If a message references external resources, use `extract_links(message_id)` followed by `fetch_link(url)` for public manuals, torque charts, or known-good references.
+   - For a complete thread that looks rich in photos/diagrams/PDFs, call the dedicated `get_thread_attachments(thread_id)` first. It returns every attachment across the discussion with author + message context in one shot. This is the most efficient way to gather figures for a professional manual-style document.
+   - For individual messages, use `list_attachments(message_id)` then `get_attachment(message_id, attachment_id)`.
+     - PDFs: use the `text_content` (extracted via pypdf). Note figure or page references.
+     - Images: the tool returns `is_image: true` + full base64 data. Provide clear Markdown insertion guidance + alt text + attribution (message/author/date).
+   - When experts mention external manuals or torque charts via links, use `extract_links(message_id)` + `fetch_link(url)`. `fetch_link` now automatically extracts text from PDF links.
+   - For very long detailed posts containing torque tables or procedures, call `get_message(..., include_full_body=True)` or `get_thread(..., include_full_bodies=True)` so nothing important is truncated.
 
 5. **Cross-reference and supplement**
    - Use `search_mailing_list` with precise queries when `get_expert_guidance` returns insufficient coverage on a sub-topic (e.g. specific torque sequence or clearance).
