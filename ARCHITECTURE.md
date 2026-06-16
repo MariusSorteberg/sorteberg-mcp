@@ -45,6 +45,74 @@ All results are designed to be rich in attribution (author name/email, date, mes
 3. **Owner Gmail OAuth**
    - Completely separate flow. Only the server ever sees the Gmail tokens.
 
+### 4. Flow Diagrams
+
+#### 4.1 Initial Gmail Owner Authentication Flow (Token Storage in Firestore)
+
+This flow is performed once (or when the owner needs to re-authorize). The goal is for the server to obtain a long-lived `refresh_token` from Google and persist it securely.
+
+```mermaid
+sequenceDiagram
+    participant Owner as Owner (Browser, logged in as marius@sorteberg.no)
+    participant MCP as MCP Server (Cloud Run)
+    participant Google as accounts.google.com (OAuth)
+    participant FS as Firestore (mcp_config/gmail_owner)
+
+    Owner->>MCP: GET /oauth/google/start<br/>(Authorization: Bearer <AGENT_BEARER_TOKEN> or via Cloud Run IAM)
+    Note over MCP: require_agent() passes (bearer or IAM)
+    MCP->>Google: Redirect to /o/oauth2/auth<br/>(client_id, scope=gmail.readonly, access_type=offline, prompt=consent, redirect_uri)
+    Google-->>Owner: Google Sign-in + Consent screen
+    Owner->>Google: Approve access
+    Google->>MCP: GET /oauth/google/callback?code=...&state=...
+    MCP->>Google: POST /token (code, client_id, client_secret, grant_type=authorization_code)
+    Google-->>MCP: {access_token, refresh_token, id_token, ...}
+    MCP->>MCP: Parse email from id_token (or profile)
+    MCP->>FS: set({email, access_token, refresh_token, ...}, merge=true)
+    FS-->>MCP: Stored
+    MCP-->>Owner: HTML Success page<br/>"Gmail connected successfully"
+```
+
+Key points:
+- The `refresh_token` is only returned on the first consent (or when `prompt=consent` + `access_type=offline`).
+- Tokens are stored server-side only.
+- The `AGENT_BEARER_TOKEN` (or Cloud Run IAM) protects this endpoint so random visitors can't trigger owner re-auth.
+
+#### 4.2 Regular Tool Usage Flow (in Terminal / Grok)
+
+This is the everyday flow when you (or Grok in the terminal/web) use the MCP tools.
+
+```mermaid
+sequenceDiagram
+    participant Client as Grok / Terminal (MCP Client)
+    participant MCP as MCP Server (Cloud Run)
+    participant FS as Firestore
+    participant Gmail as Gmail API (gmail.googleapis.com)
+
+    Client->>MCP: POST /mcp<br/>{ "method": "tools/call", "params": { "name": "search_mailing_list" or "get_expert_guidance", ... } }<br/>Authorization: Bearer <AGENT_BEARER_TOKEN>
+    Note over MCP: Middleware mcp_auth_middleware runs require_agent()
+    MCP->>MCP: if auth == bearer → proceed (or valid Google ID token from IAM)
+    MCP->>FS: get_owner_record() → load {refresh_token, access_token, ...}
+    FS-->>MCP: Owner record
+    alt access_token expired or missing
+        MCP->>Gmail: POST /token (refresh_token, grant_type=refresh_token)
+        Gmail-->>MCP: New access_token
+        MCP->>FS: Update access_token + updated_at
+    end
+    MCP->>Gmail: API call (messages.list / threads.get / attachments.get)<br/>with Authorization: Bearer <access_token> + label filter
+    Gmail-->>MCP: Message data (headers, body, attachments, threadId, ...)
+    MCP->>MCP: Enrich result (parse author name, extract links, attachment metadata, full thread if requested)
+    MCP-->>Client: JSON-RPC result (structured data with author attribution, message IDs, etc.)
+    Client->>Client: Grok uses the data to generate how-to / writeup with proper sourcing
+```
+
+Key points:
+- The client (Grok) never sees Gmail tokens — only the results of tool calls.
+- Token refresh is fully automatic and transparent.
+- All results include author name/email and source identifiers so Grok can attribute advice correctly.
+- The same bearer token (obtained via the PKCE "none" flow during Custom Connector setup) is used for every call.
+
+### 5. Web Layer (FastAPI)
+
 ### 4. Web Layer (FastAPI)
 - Health check, root info page, debug endpoints.
 - Owner OAuth flow for Gmail.
