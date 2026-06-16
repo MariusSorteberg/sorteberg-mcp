@@ -111,15 +111,69 @@ Key points:
 - All results include author name/email and source identifiers so Grok can attribute advice correctly.
 - The same bearer token (obtained via the PKCE "none" flow during Custom Connector setup) is used for every call.
 
-### 5. Web Layer (FastAPI)
+## Using the MCP from the Grok Web Client
 
-### 4. Web Layer (FastAPI)
+The Sorteberg MCP is designed to integrate directly with the Grok web client (at grok.x.ai or via the X platform) using the built-in Custom Connectors feature. This allows Grok to discover and call your mailing list search tools natively during conversations, without any manual copying of emails or tokens.
+
+### Adding the Custom Connector
+
+1. In the Grok web interface, go to the settings or connectors section and select the option to add a new Custom Connector (sometimes labeled as "MCP server" or "Custom tool provider").
+
+2. Enter a descriptive name for the connector, such as "Sorteberg Merak Gmail MCP".
+
+3. Set the MCP server URL to the primary endpoint that serves the official streamable-http transport:
+   ```
+   https://<your-deployed-service-domain>/mcp
+   ```
+   (This is the path where the FastMCP tools are exposed for modern clients like Grok.)
+
+4. Since tool access requires authentication, the connector will prompt for OAuth credentials. Configure it using the "none (PKCE only, recommended)" token auth method:
+   - Provide the Authorization Endpoint and Token Endpoint from your MCP server (these endpoints are hosted on the same service and support public client flows).
+   - Client Secret can be left empty.
+   - Scopes can typically be left blank or set to a minimal value like "mcp" if required by the form.
+
+5. Save the connector and complete the OAuth authorization flow when prompted. Grok will handle obtaining the necessary access credentials through this flow.
+
+Once added, Grok will automatically probe the connector (using standard MCP discovery methods like `tools/list`) and make the available tools visible in your conversations.
+
+### Available Tools and How Grok Uses Them
+
+After a successful connection, the following tools from your MCP become available for Grok to use automatically or on request:
+
+- `search_mailing_list` — for querying emails in your allowed labels with flexible filters.
+- `get_expert_guidance` — a specialized tool that retrieves enriched, expert-sourced discussions suitable for building how-tos.
+- Supporting tools such as `get_message`, `get_thread`, `list_attachments`, `get_attachment`, `extract_links`, `fetch_link`, `search_by_author`, and `list_labels`.
+
+Grok can call these tools in the background when you reference your connected data. For example, it might use `search_mailing_list` with a query focused on your "Merak Group" label, then follow up with `get_thread` or `get_expert_guidance` to gather full context and author-attributed advice.
+
+### Example Usage in Grok Conversations
+
+You can prompt Grok directly in the web client to leverage the MCP:
+
+- "Using my Sorteberg MCP (Merak Group label), search for expert discussions on overhauling the engine and create a detailed, step-by-step how-to guide with tips, warnings, and attributions to specific posts or authors from the list."
+- "From the connected mailing list tools, pull the best advice on gearbox issues and format it as a troubleshooting guide with sources."
+- "Help me generate a comprehensive writeup on headlight hydraulics by querying the MCP tools for relevant threads and attachments."
+
+Grok will handle tool selection, parameter construction (including label restrictions), and synthesis of the results into a coherent response. You don't need to know the exact tool names or query syntax — natural language is usually sufficient, especially when you mention "my MCP", "Sorteberg connector", or the specific label.
+
+### Best Practices and Notes
+
+- Be specific in your prompts about the label (e.g., "Merak Group") and the type of output you want (structured steps, expert quotes, warnings, etc.). This helps Grok choose the right tools and parameters.
+- The MCP connection gives Grok read-only access only to the results of the tools — your actual email content and Gmail credentials remain on the server side and are never exposed.
+- If tools don't appear immediately after adding the connector, try starting a new conversation or refreshing the page. You can also ask Grok explicitly: "List the tools available from my Sorteberg MCP connector."
+- The connector uses the modern MCP transport, so Grok gets full support for the rich tool schemas (including descriptions that help it decide when and how to call each one).
+- For ongoing use, the connection persists across sessions. You can manage or remove the connector from Grok's settings at any time.
+- If you need to re-authorize the connector (e.g., after token expiration), simply re-run the OAuth step in the connector configuration.
+
+This setup turns your unstructured email archives into a live, queryable knowledge source that Grok can consult directly in the web interface for tasks like research, troubleshooting, or creating detailed technical documentation based on real expert input from the mailing lists.
+
+### 5. Web Layer (FastAPI)
 - Health check, root info page, debug endpoints.
 - Owner OAuth flow for Gmail.
 - Minimal OAuth2 endpoints to satisfy Grok’s “Custom Connector” OAuth (PKCE none) wizard so it can obtain the bearer token.
 - Middleware that applies bearer checks to MCP paths.
 
-### 5. Deployment
+### 6. Deployment
 - Dockerfile based on Python slim image.
 - Deployed via `gcloud run deploy --source=.` (Cloud Run source deployer builds the image).
 - Environment managed via `env-vars-file` (contains non-sensitive values + the agent bearer).

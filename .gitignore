@@ -47,3 +47,8 @@ secrets/
 
 # Cloud / deployment
 .gcloudignore
+
+# Backup and old files
+*.OLD
+*.old
+*~
