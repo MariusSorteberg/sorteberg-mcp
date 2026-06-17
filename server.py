@@ -491,19 +491,34 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
                 except Exception as e:
                     summary["errors"].append(str(e)[:100])
 
-        # Drive input side (respects car model subfolders via list)
+        # Drive input side - now traverses car model subfolders
         if DRIVE_INPUT_FOLDER_ID:
             try:
-                files_resp = list_drive_files(query="", max_results=40, folder_id=DRIVE_INPUT_FOLDER_ID)
-                files = files_resp.get("files", []) if isinstance(files_resp, dict) else []
+                top_resp = list_drive_files(query="", max_results=50, folder_id=DRIVE_INPUT_FOLDER_ID)
+                top_items = top_resp.get("files", []) if isinstance(top_resp, dict) else []
             except Exception as e:
-                files = []
-                summary["errors"].append(f"drive list: {str(e)[:80]}")
+                top_items = []
+                summary["errors"].append(f"drive top list: {str(e)[:80]}")
 
-            for f in files:
-                if not isinstance(f, dict):
+            drive_files_to_process = []
+            for item in top_items:
+                if not isinstance(item, dict):
                     continue
-                if f.get("mimeType", "").startswith("application/vnd.google-apps.folder"):
+                if item.get("mimeType", "").startswith("application/vnd.google-apps.folder"):
+                    # Recurse into model subfolder
+                    try:
+                        sub_resp = list_drive_files(query="", max_results=50, folder_id=item["id"])
+                        for sf in sub_resp.get("files", []):
+                            if not sf.get("mimeType", "").startswith("application/vnd.google-apps.folder"):
+                                sf["_parent_folder"] = item.get("name", "")
+                                drive_files_to_process.append(sf)
+                    except Exception as e:
+                        summary["errors"].append(f"drive subfolder {item.get('name')}: {str(e)[:60]}")
+                else:
+                    drive_files_to_process.append(item)
+
+            for f in drive_files_to_process:
+                if not isinstance(f, dict):
                     continue
                 try:
                     file_data = get_drive_file(f["id"])
@@ -516,6 +531,7 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
                         "name": f.get("name", ""),
                         "mime": f.get("mimeType", ""),
                         "modified": f.get("modifiedTime", ""),
+                        "model_folder": f.get("_parent_folder", ""),
                     }
                     chunks = _chunk_text(text, base_meta)
                     for ch in chunks:
@@ -1522,6 +1538,7 @@ async def mcp_auth_middleware(request: Request, call_next):
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "sorteberg-mcp", "allowed_labels": ALLOWED_LABELS}
+
 
 @app.get("/debug/auth")
 def debug_auth(request: Request):
