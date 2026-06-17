@@ -79,11 +79,15 @@ gcloud run deploy sorteberg-mcp \
 Use an `env-vars-file` (YAML) for most values. Example `/tmp/mcp-env-vars.yaml`:
 
 ```yaml
-ALLOWED_LABELS: "Merak Group,Citroën SM"
+ALLOWED_LABELS: "Merak Group,Citroen SM"
 AGENT_BEARER_TOKEN: "your-long-random-bearer-token-here"
 GOOGLE_CLIENT_ID: "3281...apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET: "GOCSPX-..."
 REDIRECT_URI: "https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/oauth/google/callback"
+
+# Google Drive (optional but recommended for the expert howto workflow)
+DRIVE_INPUT_FOLDER_ID: "your-input-folder-id-for-pdfs-and-sources"
+DRIVE_OUTPUT_FOLDER_ID: "your-output-folder-id-for-generated-pdfs"
 ```
 
 **Security note**: The Gmail client secret is sensitive. For production you should move it to Secret Manager and use `--set-secrets`.
