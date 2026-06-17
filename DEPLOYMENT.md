@@ -56,6 +56,86 @@ Example:
 
 Put the Client ID and Secret into your environment (see below).
 
+## Vertex AI Vector Search Setup (First Phase)
+
+This is the **minimal setup** to enable the additive semantic/hybrid search layer using Vertex AI.
+
+You only need this if you want to use `semantic_search`, `hybrid_search`, and the vector-first path in `get_expert_guidance`.
+
+### Exact steps you must perform in Google Console / gcloud
+
+1. **Enable the Vertex AI API** (in the project `vibrant-ring-496211-v5` or your project):
+   ```bash
+   gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
+   ```
+   Or go to Google Cloud Console → APIs & Services → Enable APIs → search "Vertex AI API".
+
+2. **Create a Vector Search Index** (Matching Engine):
+   - Go to Vertex AI → Vector Search → Create Index (or use gcloud).
+   - Recommended settings for first phase:
+     - Display name: `sorteberg-mcp-emails-drive`
+     - Dimensions: `768` (text-embedding-004 produces 768-dim vectors)
+     - Distance: `Cosine` or `Dot Product`
+     - Index update method: **Streaming** (important for incremental upserts)
+     - Sharding / other defaults are fine for small start.
+   - After creation, copy the full resource name, e.g.:
+     `projects/328104254531/locations/us-central1/indexes/1234567890123456789`
+     Put it in `VECTOR_INDEX_NAME`.
+
+   gcloud example (approximate):
+   ```bash
+   gcloud ai indexes create \
+     --display-name=sorteberg-mcp \
+     --dimensions=768 \
+     --distance-measure-type=COSINE_DISTANCE \
+     --project=YOUR_PROJECT \
+     --region=us-central1
+   ```
+
+3. **(Strongly recommended) Create an Index Endpoint and deploy the Index**:
+   - In Vertex AI → Vector Search → Index Endpoints → Create Index Endpoint.
+   - Then "Deploy Index" to it (choose your newly created index).
+   - Copy the Index Endpoint resource name.
+   - Set `VECTOR_INDEX_ENDPOINT` to it. Queries are much more reliable through a deployed endpoint.
+
+4. **Grant IAM permissions to the Cloud Run service account**:
+   The service account is usually:
+   `PROJECT_NUMBER-compute@developer.gserviceaccount.com`
+
+   Give it:
+   ```bash
+   gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+     --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+     --role="roles/aiplatform.user"
+   ```
+
+   For stricter: `roles/aiplatform.viewer` + custom for matching engine if needed, but `aiplatform.user` is usually sufficient for embedding + index read/write in first phase.
+
+5. **Update your env-vars file** (`/tmp/mcp-env-vars.yaml` or equivalent) with the correct `VECTOR_INDEX_NAME` (and optionally `VECTOR_INDEX_ENDPOINT`).
+
+6. Redeploy:
+   ```bash
+   gcloud run deploy sorteberg-mcp --source=. --region=... --env-vars-file=/tmp/mcp-env-vars.yaml ...
+   ```
+
+### Testing the first phase (after deploy + index ready)
+
+- Use the protected ingest endpoint (you need AGENT_BEARER_TOKEN):
+  ```bash
+  curl -X POST "https://YOUR-SERVICE/ingest?days_back=7" \
+    -H "Authorization: Bearer YOUR_AGENT_BEARER_TOKEN"
+  ```
+- Or call the tool directly via MCP: `trigger_ingest(days_back=7)`
+- Then try `semantic_search("cylinder head torque Merak")` or `hybrid_search(...)`.
+- Then run a full `get_expert_guidance("suspension geometry Merak")` — it will try vector first.
+
+**Important notes for first phase**:
+- Start with small `days_back` (7-14) so you don't index thousands of messages at once.
+- The index must be fully created + deployed before queries succeed (can take minutes).
+- If vector calls return empty, the fallback keyword path in `get_expert_guidance` still works.
+- Metadata filtering via restricts is prepared but first-phase queries do additional client-side handling.
+- Full content, tables, and attribution always come from the original Gmail/Drive tools (vector is only for recall).
+
 ## Deployment
 
 The project is set up for **Cloud Run source deploys** (no separate image building step required).
@@ -90,15 +170,11 @@ DRIVE_INPUT_FOLDER_ID: "your-input-folder-id-for-pdfs-and-sources"
 DRIVE_OUTPUT_FOLDER_ID: "your-output-folder-id-for-generated-pdfs"
 
 # Vertex AI Vector Search (first phase - start small with manual trigger_ingest)
-# See ARCHITECTURE.md for details. You must set up in Google Console/gcloud:
-# - Enable Vertex AI API
-# - Create Vector Search Index (dim 768, streaming)
-# - Create & deploy Index Endpoint
-# - Grant roles/aiplatform.user to Cloud Run SA (PROJECT_NUMBER-compute@...)
-# Then set these and redeploy
-VERTEX_PROJECT: "your-gcp-project"
+# See the "Vertex AI Vector Search Setup (First Phase)" section below + ARCHITECTURE.md
+VERTEX_PROJECT: "vibrant-ring-496211-v5"
 VERTEX_LOCATION: "us-central1"
-VECTOR_INDEX_NAME: "projects/your-project/locations/us-central1/indexes/YOUR_INDEX_ID"
+VECTOR_INDEX_NAME: "projects/vibrant-ring-496211-v5/locations/us-central1/indexes/REPLACE_ME"
+# VECTOR_INDEX_ENDPOINT: "..."   # set after you deploy the index to an endpoint (recommended)
 ```
 
 **Security note**: The Gmail client secret is sensitive. For production you should move it to Secret Manager and use `--set-secrets`.

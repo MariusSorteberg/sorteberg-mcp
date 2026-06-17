@@ -340,12 +340,13 @@ sequenceDiagram
 
 This enhances `get_expert_guidance` (still the primary for the skill) while keeping all existing attribution and full-content tools.
 
-### 7.3 New/Updated Tools (Starting Small)
+### 7.3 New/Updated Tools (First Phase)
 
-- `semantic_search(query, label_or_folder=None, top_k=10, filters={})`: Returns top matching chunks from vector index with scores and metadata.
-- `hybrid_search(...)`: Combines vector + existing keyword search.
-- Enhanced `get_expert_guidance`: Internally calls semantic_search first for better recall, then enriches.
-- `trigger_index(manual=True)`: For manual updates.
+- `semantic_search(query, label=None, top_k=8)`: Semantic retrieval using Vertex AI. Returns chunk references (email_*/drive_* ids + scores). Use with get_thread/get_drive_file for full attributed content.
+- `hybrid_search(query, label=None, top_k=8)`: Combines a few vector hits + keyword search_mailing_list results (deduped).
+- Enhanced `get_expert_guidance`: Starts with vector semantic recall, then falls back/enriches with keyword + full thread fetch.
+- `trigger_ingest(manual=True, days_back=7)` + protected `POST /ingest`: Manual indexing trigger. Chunks with bias toward keeping tables/paragraphs together.
+- Ingestion also writes `vector_last_ingest` to Firestore owner doc.
 
 The skill.md will be updated to instruct starting with semantic tools for relevant context before full synthesis.
 
@@ -362,10 +363,10 @@ This is additive: keyword tools remain available for exact matches or when vecto
 ## Current Limitations & Future Ideas (Updated)
 
 - Full email bodies and threads can get large — truncation is now controllable per call via `include_full_bodies=True` / `include_full_body=True` (and get_expert_guidance pulls fuller content). Very large threads may still need selective follow-up.
-- ~~No semantic/vector search yet (keyword + Gmail search only).~~ **In progress** — Vertex AI Vector Search layer added (starting small with manual/scheduled indexing).
+- ~~No semantic/vector search yet (keyword + Gmail search only).~~ **First phase implemented** — Vertex AI Vector Search layer (manual/scheduled trigger, chunking, semantic_search + hybrid_search, wired into get_expert_guidance).
 - Image attachments return full base64 + metadata (vision works well client-side; no server-side description yet).
 - No write access to Gmail (by design).
-- ~~No persistent indexing of the archive (every search hits Gmail API).~~ **In progress** — Vector index + metadata for fast semantic retrieval.
+- ~~No persistent indexing of the archive (every search hits Gmail API).~~ **First phase** — Vector index with metadata filters support (restricts) + last_sync state in Firestore.
 
 Possible future enhancements:
 - Full Pub/Sub incremental indexing for Gmail.
