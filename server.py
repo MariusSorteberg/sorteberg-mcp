@@ -386,19 +386,31 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
     raw_results = []
     try:
         if VECTOR_INDEX_ENDPOINT:
-            endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VECTOR_INDEX_ENDPOINT)
-            deployed_id = VECTOR_DEPLOYED_INDEX_ID or VECTOR_INDEX_NAME.split("/")[-1]
-            response = endpoint.find_neighbors(
-                deployed_index_id=deployed_id,
-                queries=[embedding],
-                num_neighbors=min(top_k * 3, 50),
-            )
-            for neighbor in (response[0] if response else []):
-                raw_results.append({
-                    "id": neighbor.id,
-                    "score": getattr(neighbor, "distance", None) or getattr(neighbor, "similarity", None),
-                    "metadata": {}
-                })
+            try:
+                endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VECTOR_INDEX_ENDPOINT)
+                deployed_id = VECTOR_DEPLOYED_INDEX_ID or VECTOR_INDEX_NAME.split("/")[-1]
+                response = endpoint.find_neighbors(
+                    deployed_index_id=deployed_id,
+                    queries=[embedding],
+                    num_neighbors=min(top_k * 3, 50),
+                )
+                for neighbor in (response[0] if response else []):
+                    raw_results.append({
+                        "id": neighbor.id,
+                        "score": getattr(neighbor, "distance", None) or getattr(neighbor, "similarity", None),
+                        "metadata": {}
+                    })
+            except Exception as ep_err:
+                logger.warning(f"Endpoint query failed (may not be deployed yet): {ep_err}. Falling back to direct index.")
+                # fallthrough to direct
+                index = aiplatform.MatchingEngineIndex(index_name=VECTOR_INDEX_NAME)
+                response = index.find_neighbors(queries=[embedding], num_neighbors=min(top_k * 3, 50))
+                for neighbor in (response[0] if response else []):
+                    raw_results.append({
+                        "id": neighbor.id,
+                        "score": getattr(neighbor, "distance", None) or getattr(neighbor, "similarity", None),
+                        "metadata": {}
+                    })
         else:
             index = aiplatform.MatchingEngineIndex(index_name=VECTOR_INDEX_NAME)
             response = index.find_neighbors(queries=[embedding], num_neighbors=min(top_k * 3, 50))
@@ -444,6 +456,13 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
             except Exception as e:
                 summary["errors"].append(f"search label {label}: {str(e)[:80]}")
                 continue
+
+            # If search returned the "no results" sentinel, retry without date filter (archives may be older)
+            if msgs and isinstance(msgs[0], dict) and "message" in msgs[0] and "searched_labels" in msgs[0]:
+                try:
+                    msgs = search_mailing_list(query="", label=label, max_results=80)
+                except Exception:
+                    msgs = []
 
             for msg in (msgs or []):
                 if not isinstance(msg, dict) or not msg.get("id"):
