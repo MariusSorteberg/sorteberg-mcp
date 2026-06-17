@@ -39,7 +39,7 @@ Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, 
 - `search_mailing_list`, `get_message`, `get_thread`, `get_expert_guidance` — Core email archive tools (with full-body and attribution support).
 - `list_attachments` / `get_attachment`, `get_thread_attachments` — Email attachments (PDF text + images).
 - `list_input_manuals(model=None)` — List the Drive input folder (Car manuals). Subfolders are sorted by car model (Barchetta, Khamsin, etc.). Pass `model="Barchetta"` to list inside a specific model's folder.
-- `save_to_guides(title, content, as_pdf=True)` — Recommended convenience wrapper to publish the howto PDF/.md to the output folder.
+- `save_to_guides(title, content, as_pdf=True)` — Recommended convenience wrapper to publish the howto PDF/.md to the output folder. Filenames are timestamped (e.g. Title_2026-06-17_12-34-56.pdf) to prevent duplicates.
 - `list_drive_files` / `get_drive_file` / `save_howto_to_drive` — Lower-level versions (still available).
 - `extract_links` / `fetch_link`, `search_by_author` — Supporting tools.
 - `search_gmail` — Legacy wrapper.

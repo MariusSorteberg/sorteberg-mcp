@@ -48,7 +48,7 @@ Trigger phrase examples (you recognize these automatically):
    - Email attachments: `list_attachments` + `get_attachment` / `get_thread_attachments`.
    - Links: `extract_links` + `fetch_link`.
    - Long posts: use `include_full_bodies=True`.
-   - Publish finished docs: `save_to_guides(title=..., content=..., as_pdf=True)`.
+   - Publish finished docs: `save_to_guides(title=..., content=..., as_pdf=True)`. Filenames are timestamped to avoid duplicates.
 
 5. **Cross-reference and supplement**
    - Use `search_mailing_list` with precise queries when `get_expert_guidance` returns insufficient coverage on a sub-topic (e.g. specific torque sequence or clearance).
