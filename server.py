@@ -903,6 +903,7 @@ def get_drive_file(file_id: str) -> Dict[str, Any]:
 def save_howto_to_drive(title: str, content: str, as_pdf: bool = True, folder_id: Optional[str] = None) -> Dict[str, Any]:
     """Save a generated howto to the configured OUTPUT Drive folder.
     content can be Markdown or plain text. If as_pdf=True a basic PDF is created using reportlab.
+    Filenames are automatically timestamped (e.g. Title_2026-06-17_12-34-56.pdf) to avoid duplicates in the output folder.
     Returns the created file metadata.
     """
     service = get_drive_service()
@@ -916,31 +917,108 @@ def save_howto_to_drive(title: str, content: str, as_pdf: bool = True, folder_id
     from io import BytesIO
     import textwrap
     from googleapiclient.http import MediaIoBaseUpload
+    from datetime import datetime
 
     filename_base = title.replace(" ", "_").replace("/", "-")[:80]
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename_base = f"{filename_base}_{timestamp}"
 
     if as_pdf:
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+        from io import BytesIO
+
         buffer = BytesIO()
-        c = canvas.Canvas(buffer, pagesize=letter)
-        width, height = letter
-        y = height - 0.75 * inch
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=0.6*inch,
+            leftMargin=0.6*inch,
+            topMargin=0.6*inch,
+            bottomMargin=0.6*inch
+        )
 
-        # Very basic PDF renderer (title + wrapped text). For rich Markdown/tables use a full converter later.
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(0.75 * inch, y, title[:90])
-        y -= 0.4 * inch
+        styles = getSampleStyleSheet()
 
-        c.setFont("Helvetica", 10)
-        for line in content.splitlines():
-            for wrapped in textwrap.wrap(line, width=95) or [""]:
-                if y < 0.6 * inch:
-                    c.showPage()
-                    y = height - 0.75 * inch
-                    c.setFont("Helvetica", 10)
-                c.drawString(0.75 * inch, y, wrapped)
-                y -= 14
+        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=16, spaceAfter=12, alignment=TA_CENTER)
+        heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=12, spaceBefore=10, spaceAfter=6)
+        body_style = ParagraphStyle('CustomBody', parent=styles['Normal'], fontSize=9, leading=11, spaceAfter=4)
+        notes_style = ParagraphStyle('NotesStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.gray, spaceBefore=6)
 
-        c.save()
+        story = []
+        story.append(Paragraph(title, title_style))
+        story.append(Spacer(1, 8))
+
+        # Split for separate references block
+        main_content = content
+        references_block = ""
+        for marker in ["**GENERATION NOTES", "GENERATION NOTES - MCP / SKILL"]:
+            if marker in content:
+                parts = content.split(marker, 1)
+                main_content = parts[0].strip()
+                references_block = (marker + parts[1]) if len(parts) > 1 else ""
+                break
+
+        # Parse content into flowables (headings + tables + paragraphs)
+        lines = main_content.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
+                continue
+
+            if line.startswith('### '):
+                story.append(Paragraph(line[4:], heading_style))
+            elif line.startswith('## '):
+                story.append(Paragraph(line[3:], heading_style))
+            elif line.startswith('# '):
+                story.append(Paragraph(line[2:], title_style))
+            elif line.startswith('|') and '|' in line[1:]:
+                table_lines = [line]
+                i += 1
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    table_lines.append(lines[i].strip())
+                    i += 1
+                table_data = []
+                for tl in table_lines:
+                    if '---' in tl: continue
+                    cells = [c.strip() for c in tl.split('|')[1:-1]]
+                    table_data.append(cells)
+                if table_data:
+                    t = Table(table_data)
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 8),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 3),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ]))
+                    story.append(Spacer(1, 6))
+                    story.append(t)
+                    story.append(Spacer(1, 6))
+                continue
+            else:
+                safe = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                story.append(Paragraph(safe, body_style))
+            i += 1
+
+        if references_block:
+            story.append(PageBreak())
+            story.append(Paragraph("GENERATION NOTES (MCP / Skills)", heading_style))
+            story.append(Paragraph("(This block can be removed for public distribution)", notes_style))
+            story.append(Spacer(1, 6))
+            for line in references_block.splitlines():
+                if line.strip():
+                    safe = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    story.append(Paragraph(safe, notes_style))
+
+        doc.build(story)
         buffer.seek(0)
 
         file_metadata = {
@@ -950,7 +1028,6 @@ def save_howto_to_drive(title: str, content: str, as_pdf: bool = True, folder_id
         }
         media = MediaIoBaseUpload(buffer, mimetype="application/pdf", resumable=True)
     else:
-        # Save as Markdown / text
         file_metadata = {
             "name": f"{filename_base}.md",
             "parents": [target_folder] if target_folder else None,
@@ -1022,6 +1099,7 @@ def list_input_manuals(model: Optional[str] = None, max_results: int = 20) -> Di
 def save_to_guides(title: str, content: str, as_pdf: bool = True) -> Dict[str, Any]:
     """Save a generated howto directly to the output Drive folder (Generated guides).
 
+    Filenames are automatically timestamped to prevent duplicate files with the same name.
     This is the recommended convenience tool for the expert when publishing
     a finished professional document.
     """
