@@ -62,6 +62,16 @@ DRIVE_SCOPES = [
 DRIVE_INPUT_FOLDER_ID = os.getenv("DRIVE_INPUT_FOLDER_ID", "")
 DRIVE_OUTPUT_FOLDER_ID = os.getenv("DRIVE_OUTPUT_FOLDER_ID", "")
 
+# Vertex AI Vector Search config (for semantic search over emails + Drive docs)
+VERTEX_PROJECT = os.getenv("VERTEX_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
+# The Vector Search index resource name, e.g. projects/.../locations/.../indexes/...
+VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "")
+# Optional: deployed index endpoint for queries if using endpoint
+VECTOR_INDEX_ENDPOINT = os.getenv("VECTOR_INDEX_ENDPOINT", "")
+# For embeddings model
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+
 # Firestore storage for the Gmail owner tokens (persistent, survives restarts)
 TOKEN_COLLECTION = "mcp_config"
 TOKEN_DOCUMENT = "gmail_owner"
@@ -259,6 +269,168 @@ def get_drive_service():
 
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     return service
+
+
+# -----------------------------------------------------------------------------
+# Vertex AI Vector Search helpers (starting small - manual/scheduled indexing)
+# -----------------------------------------------------------------------------
+
+def _init_vertex():
+    """Lazy init Vertex AI."""
+    import vertexai
+    if VERTEX_PROJECT:
+        vertexai.init(project=VERTEX_PROJECT, location=VERTEX_LOCATION)
+
+
+def get_embedding(text: str) -> List[float]:
+    """Generate embedding using Vertex AI text-embedding model."""
+    if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
+        raise HTTPException(500, "Vertex AI Vector Search not configured (set VERTEX_PROJECT and VECTOR_INDEX_NAME)")
+    _init_vertex()
+    from vertexai.language_models import TextEmbeddingModel
+    model = TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL)
+    embeddings = model.get_embeddings([text])
+    return embeddings[0].values
+
+
+def upsert_chunks(chunks: List[Dict[str, Any]]):
+    """Upsert chunks (with id, embedding, metadata) to Vertex AI Vector Search index.
+    chunks: [{"id": "...", "embedding": [...], "metadata": {...}}, ...]
+    Metadata can include 'label', 'model', 'author', 'date', 'source_type' etc for filtering.
+    """
+    if not VECTOR_INDEX_NAME:
+        raise HTTPException(500, "VECTOR_INDEX_NAME not set")
+    import google.cloud.aiplatform as aiplatform
+    index = aiplatform.MatchingEngineIndex(index_name=VECTOR_INDEX_NAME)
+    datapoints = []
+    for chunk in chunks:
+        restricts = []
+        for key, val in (chunk.get("metadata") or {}).items():
+            if val:
+                restricts.append({
+                    "namespace": key,
+                    "allow_list": [str(val)] if not isinstance(val, list) else [str(v) for v in val]
+                })
+        datapoints.append({
+            "datapoint_id": chunk["id"],
+            "feature_vector": chunk["embedding"],
+            "restricts": restricts
+        })
+    if datapoints:
+        index.upsert_datapoints(datapoints=datapoints)
+        logger.info(f"Upserted {len(datapoints)} chunks to Vector Search")
+
+
+def semantic_search(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Semantic search over the vector index.
+    Returns list of {'id': , 'score': , 'metadata': ...}
+    """
+    if not VECTOR_INDEX_NAME:
+        return []
+    import google.cloud.aiplatform as aiplatform
+    _init_vertex()
+    embedding = get_embedding(query)
+    # Prefer deployed endpoint if configured for production queries
+    if VECTOR_INDEX_ENDPOINT:
+        endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VECTOR_INDEX_ENDPOINT)
+        # deployed_index_id is usually the index name suffix or configured
+        deployed_id = VECTOR_INDEX_NAME.split("/")[-1]  # simplistic
+        response = endpoint.find_neighbors(
+            deployed_index_id=deployed_id,
+            queries=[embedding],
+            num_neighbors=top_k,
+            # can pass filter if supported
+        )
+        results = []
+        for neighbor in response[0]:  # first query
+            results.append({
+                "id": neighbor.id,
+                "score": neighbor.distance,  # or similarity
+                "metadata": {}  # metadata not always returned; store separately if needed
+            })
+        return results
+    else:
+        # Fallback: use index directly (for dev/small)
+        index = aiplatform.MatchingEngineIndex(index_name=VECTOR_INDEX_NAME)
+        # Note: direct query on index may have limits; prefer endpoint
+        response = index.find_neighbors(
+            queries=[embedding],
+            num_neighbors=top_k,
+        )
+        results = []
+        for neighbor in response[0]:
+            results.append({
+                "id": neighbor.id,
+                "score": neighbor.distance,
+                "metadata": {}
+            })
+        return results
+
+
+def trigger_ingest(manual: bool = True, days_back: int = 7) -> Dict[str, Any]:
+    """Manual or scheduled ingestion for first phase.
+    Fetches recent emails from allowed labels and recent Drive files, chunks, embeds, upserts.
+    For small start: processes recent items only.
+    Returns summary.
+    """
+    summary = {"emails_indexed": 0, "drive_files_indexed": 0, "chunks": 0, "errors": []}
+    try:
+        # Gmail incremental (use after: date)
+        from datetime import timedelta
+        after_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y/%m/%d")
+        for label in ALLOWED_LABELS:
+            msgs = search_mailing_list(query="", label=label, max_results=50, after=after_date)  # recent
+            for msg in msgs:
+                if not isinstance(msg, dict) or "id" not in msg: continue
+                try:
+                    full = get_message(msg["id"], include_full_body=True)
+                    text = full.get("body_text", "") or full.get("snippet", "")
+                    if not text: continue
+                    # Simple chunk: whole message for small start (later: split)
+                    emb = get_embedding(text[:8000])  # truncate for embedding limit
+                    chunk_id = f"email_{msg['id']}"
+                    meta = {
+                        "label": label,
+                        "source_type": "email",
+                        "message_id": msg["id"],
+                        "thread_id": full.get("threadId", ""),
+                        "author": full.get("author", {}).get("name", ""),
+                        "date": full.get("date", ""),
+                    }
+                    upsert_chunks([{"id": chunk_id, "embedding": emb, "metadata": meta}])
+                    summary["chunks"] += 1
+                    summary["emails_indexed"] += 1
+                except Exception as e:
+                    summary["errors"].append(str(e)[:100])
+        # Drive: recent files in input
+        if DRIVE_INPUT_FOLDER_ID:
+            files = list_drive_files(query="", max_results=20, folder_id=DRIVE_INPUT_FOLDER_ID).get("files", [])
+            for f in files:
+                if f.get("mimeType", "").startswith("application/vnd.google-apps.folder"): continue
+                try:
+                    file_data = get_drive_file(f["id"])
+                    text = file_data.get("text_content") or ""
+                    if not text: continue
+                    emb = get_embedding(text[:8000])
+                    chunk_id = f"drive_{f['id']}"
+                    meta = {
+                        "source_type": "drive",
+                        "file_id": f["id"],
+                        "name": f.get("name", ""),
+                        "mime": f.get("mimeType", ""),
+                        "modified": f.get("modifiedTime", ""),
+                    }
+                    upsert_chunks([{"id": chunk_id, "embedding": emb, "metadata": meta}])
+                    summary["chunks"] += 1
+                    summary["drive_files_indexed"] += 1
+                except Exception as e:
+                    summary["errors"].append(str(e)[:100])
+        logger.info(f"Ingest summary: {summary}")
+        return summary
+    except Exception as e:
+        logger.exception("Ingest failed")
+        summary["errors"].append(str(e))
+        return summary
 
 
 def list_allowed_labels(service) -> List[Dict[str, Any]]:
@@ -739,48 +911,73 @@ def get_expert_guidance(
 ) -> Dict[str, Any]:
     """
     High-level tool designed for creating full how-to writeups.
-    Searches the mailing list for expert discussions on a topic (e.g. "overhaul engine", "gearbox rebuild"),
-    fetches the most relevant threads, and returns structured data with authors, key excerpts, dates,
-    and links/attachments so Grok can synthesize an accurate, sourced step-by-step guide.
+    Now starts with semantic/vector search (Vertex AI) over the indexed archive for better recall of relevant
+    chunks from emails + Drive docs, then falls back/enriches with keyword search + full thread/file fetch.
     """
     service, owner = get_gmail_service()
-
-    # Smart multi-query search for high quality advice
-    queries = [
-        topic,
-        f'"{topic}" (howto OR "how to" OR guide OR overhaul OR rebuild OR tips OR "step by step")',
-        f'{topic} (problem OR issue OR fix OR solution)',
-    ]
 
     all_threads: List[Dict[str, Any]] = []
     seen_thread_ids = set()
 
-    for q in queries:
-        results = search_mailing_list(
-            query=q,
-            label=label,
-            max_results=max(3, max_threads),
-        )
-        for msg in results:
-            if isinstance(msg, dict) and "threadId" in msg:
-                tid = msg["threadId"]
-                if tid and tid not in seen_thread_ids:
-                    seen_thread_ids.add(tid)
-                    try:
-                        # Pull fuller bodies in the high-level guidance tool so specs and detailed procedures are not truncated
+    # Start with semantic/vector search (Vertex AI) for better relevance
+    try:
+        vec_results = semantic_search(query=topic, top_k=max(5, max_threads), label=label)
+        for vr in vec_results:
+            meta = vr.get("metadata", {})
+            tid = meta.get("thread_id") or meta.get("message_id") or vr.get("id", "").replace("email_", "")
+            if tid and tid not in seen_thread_ids:
+                seen_thread_ids.add(tid)
+                try:
+                    if meta.get("source_type") == "email" or "email_" in vr.get("id", ""):
+                        # Pull fuller bodies
                         thread = get_thread(service, tid, max_messages=10, max_body_chars=0)
                         if thread:
                             all_threads.append({
                                 "thread_id": tid,
                                 "messages": thread,
-                                "search_query_used": q,
+                                "search_query_used": "vector_semantic",
+                                "score": vr.get("score"),
                             })
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch thread {tid}: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch from vector result {tid}: {e}")
             if len(all_threads) >= max_threads:
                 break
-        if len(all_threads) >= max_threads:
-            break
+    except Exception as e:
+        logger.warning(f"Vector search failed or not configured, falling back to keyword: {e}")
+
+    # Fallback / enrich with keyword search
+    if len(all_threads) < max_threads:
+        queries = [
+            topic,
+            f'"{topic}" (howto OR "how to" OR guide OR overhaul OR rebuild OR tips OR "step by step")',
+            f'{topic} (problem OR issue OR fix OR solution)',
+        ]
+        for q in queries:
+            results = search_mailing_list(
+                query=q,
+                label=label,
+                max_results=max(3, max_threads),
+            )
+            for msg in results:
+                if isinstance(msg, dict) and "threadId" in msg:
+                    tid = msg["threadId"]
+                    if tid and tid not in seen_thread_ids:
+                        seen_thread_ids.add(tid)
+                        try:
+                            # Pull fuller bodies in the high-level guidance tool so specs and detailed procedures are not truncated
+                            thread = get_thread(service, tid, max_messages=10, max_body_chars=0)
+                            if thread:
+                                all_threads.append({
+                                    "thread_id": tid,
+                                    "messages": thread,
+                                    "search_query_used": q,
+                                })
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch thread {tid}: {e}")
+                if len(all_threads) >= max_threads:
+                    break
+            if len(all_threads) >= max_threads:
+                break
 
     # Deduplicate and limit
     unique_threads = []
@@ -1111,6 +1308,26 @@ def save_to_guides(title: str, content: str, as_pdf: bool = True) -> Dict[str, A
     )
 
 
+@mcp.tool()
+def semantic_search(query: str, top_k: int = 8, label: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Semantic (vector) search over the indexed email and Drive content.
+    Uses Vertex AI Vector Search. Returns top matching chunks with scores and metadata.
+    Use together with get_thread/get_drive_file for full context.
+    """
+    filters = {"label": label} if label else None
+    return semantic_search(query=query, top_k=top_k, filters=filters)
+
+
+@mcp.tool()
+def trigger_ingest(manual: bool = True, days_back: int = 7) -> Dict[str, Any]:
+    """Trigger manual or incremental indexing into the Vertex AI vector index.
+    Fetches recent content from Gmail labels and Drive input folder, embeds, and upserts.
+    For first phase / manual trigger. Returns summary of what was indexed.
+    Call this periodically or on-demand to keep the vector DB fresh.
+    """
+    return trigger_ingest(manual=manual, days_back=days_back)
+
+
 # Keep the old search_gmail for backward compatibility (it now calls the improved logic)
 @mcp.tool()
 def search_gmail(
@@ -1157,6 +1374,18 @@ def debug_auth(request: Request):
         "agent_bearer_set": bool(AGENT_BEARER_TOKEN),
         "agent_bearer_preview": AGENT_BEARER_TOKEN[:10] + "..." if AGENT_BEARER_TOKEN else None,
     }
+
+
+@app.post("/ingest")
+def trigger_ingest_endpoint(request: Request, days_back: int = 30):
+    """Manual trigger for first-phase vector indexing.
+    Protected by require_agent (bearer or IAM).
+    Call with bearer or via Cloud Scheduler / manually.
+    """
+    require_agent(request)
+    if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
+        return {"error": "Vertex not configured. Set VERTEX_PROJECT and VECTOR_INDEX_NAME env."}
+    return trigger_ingest(manual=True, days_back=days_back)
 
 # -----------------------------------------------------------------------------
 # Minimal OAuth2 endpoints for Grok / custom connector compatibility (PKCE "none")

@@ -88,6 +88,17 @@ REDIRECT_URI: "https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/oauth/google/callba
 # Google Drive (optional but recommended for the expert howto workflow)
 DRIVE_INPUT_FOLDER_ID: "your-input-folder-id-for-pdfs-and-sources"
 DRIVE_OUTPUT_FOLDER_ID: "your-output-folder-id-for-generated-pdfs"
+
+# Vertex AI Vector Search (first phase - start small with manual trigger_ingest)
+# See ARCHITECTURE.md for details. You must set up in Google Console/gcloud:
+# - Enable Vertex AI API
+# - Create Vector Search Index (dim 768, streaming)
+# - Create & deploy Index Endpoint
+# - Grant roles/aiplatform.user to Cloud Run SA (PROJECT_NUMBER-compute@...)
+# Then set these and redeploy
+VERTEX_PROJECT: "your-gcp-project"
+VERTEX_LOCATION: "us-central1"
+VECTOR_INDEX_NAME: "projects/your-project/locations/us-central1/indexes/YOUR_INDEX_ID"
 ```
 
 **Security note**: The Gmail client secret is sensitive. For production you should move it to Secret Manager and use `--set-secrets`.
