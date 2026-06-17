@@ -70,6 +70,8 @@ VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "")
 # Optional: deployed index endpoint for queries if using endpoint
 VECTOR_INDEX_ENDPOINT = os.getenv("VECTOR_INDEX_ENDPOINT", "")
+# The deployed_index_id you chose when running deploy-index (e.g. sorteberg_mcp_index)
+VECTOR_DEPLOYED_INDEX_ID = os.getenv("VECTOR_DEPLOYED_INDEX_ID", "")
 # For embeddings model
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
 
@@ -385,7 +387,7 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
     try:
         if VECTOR_INDEX_ENDPOINT:
             endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VECTOR_INDEX_ENDPOINT)
-            deployed_id = VECTOR_INDEX_NAME.split("/")[-1]
+            deployed_id = VECTOR_DEPLOYED_INDEX_ID or VECTOR_INDEX_NAME.split("/")[-1]
             response = endpoint.find_neighbors(
                 deployed_index_id=deployed_id,
                 queries=[embedding],
