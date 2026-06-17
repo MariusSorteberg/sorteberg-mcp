@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 ALLOWED_LABELS = [
     label.strip()
-    for label in os.getenv("ALLOWED_LABELS", "Merak Group,Citroën SM").split(",")
+    for label in os.getenv("ALLOWED_LABELS", "Merak Group,Citroen SM").split(",")
     if label.strip()
 ]
 
@@ -52,6 +52,15 @@ REDIRECT_URI = os.getenv("REDIRECT_URI") or os.getenv("BASE_URL", "https://sorte
 AGENT_BEARER_TOKEN = os.getenv("AGENT_BEARER_TOKEN") or os.getenv("MCP_BEARER_TOKEN", "")
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+
+# Google Drive scopes (readonly for input sources + file for writing howtos to output folder)
+DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+]
+
+DRIVE_INPUT_FOLDER_ID = os.getenv("DRIVE_INPUT_FOLDER_ID", "")
+DRIVE_OUTPUT_FOLDER_ID = os.getenv("DRIVE_OUTPUT_FOLDER_ID", "")
 
 # Firestore storage for the Gmail owner tokens (persistent, survives restarts)
 TOKEN_COLLECTION = "mcp_config"
@@ -81,11 +90,16 @@ def require_agent(request: Request) -> None:
 
     With --no-allow-unauthenticated, Cloud Run only forwards requests that have a valid
     Google ID token from a principal that has roles/run.invoker on the service.
-    We trust the platform for those calls. The custom AGENT_BEARER_TOKEN is still
-    supported for direct bearer-style calls (when the service allows unauthenticated
-    or for additional checks).
+    We trust the platform for those calls (including allUsers or specific users).
+
+    The custom AGENT_BEARER_TOKEN is supported for direct calls.
+    Requests with no Authorization header are allowed (Cloud Run already enforced invoker).
     """
     auth = request.headers.get("Authorization", "")
+
+    if not auth:
+        # No header: rely on Cloud Run IAM (allUsers or signed-in user with invoker)
+        return
 
     if AGENT_BEARER_TOKEN:
         expected = f"Bearer {AGENT_BEARER_TOKEN}"
@@ -170,6 +184,82 @@ def get_gmail_service() -> tuple[Any, Dict[str, Any]]:
 
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     return service, data
+
+
+def save_drive_tokens(creds: Credentials) -> None:
+    """Persist Drive tokens (refresh preferred, but access token alone can work temporarily)."""
+    existing = token_doc().get()
+    existing_data = existing.to_dict() if existing.exists else {}
+
+    refresh_token = creds.refresh_token or existing_data.get("drive_refresh_token")
+    access_token = creds.token or existing_data.get("drive_access_token")
+
+    if not refresh_token and not access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="No Drive tokens returned. Revoke access and try again with full consent (prompt=consent + access_type=offline).",
+        )
+
+    token_doc().set(
+        {
+            "drive_access_token": access_token,
+            "drive_refresh_token": refresh_token,
+            "drive_token_uri": creds.token_uri or existing_data.get("drive_token_uri"),
+            "drive_client_id": GOOGLE_CLIENT_ID,
+            "drive_client_secret": GOOGLE_CLIENT_SECRET,
+            "drive_scopes": DRIVE_SCOPES,
+            "drive_updated_at": now_iso(),
+        },
+        merge=True,
+    )
+    if refresh_token:
+        logger.info("✅ Drive refresh token saved for owner")
+    else:
+        logger.warning("✅ Drive access token saved (no refresh token this time - will need re-auth later)")
+
+
+def get_drive_service():
+    """Get an authorized Drive service. Separate from Gmail for clarity.
+    Supports cases where only an access_token was returned (no refresh_token).
+    """
+    data = get_owner_record()
+
+    access_token = data.get("drive_access_token")
+    refresh_token = data.get("drive_refresh_token")
+
+    if not access_token and not refresh_token:
+        raise HTTPException(
+            status_code=403,
+            detail="Drive not connected for this owner. Visit /oauth/google/drive/start with agent token.",
+        )
+
+    creds = Credentials(
+        token=access_token,
+        refresh_token=refresh_token,
+        token_uri=data.get("drive_token_uri", "https://oauth2.googleapis.com/token"),
+        client_id=data.get("drive_client_id", GOOGLE_CLIENT_ID),
+        client_secret=data.get("drive_client_secret", GOOGLE_CLIENT_SECRET),
+        scopes=data.get("drive_scopes", DRIVE_SCOPES),
+    )
+
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(GoogleRequest())
+                token_doc().set(
+                    {"drive_access_token": creds.token, "drive_updated_at": now_iso()},
+                    merge=True,
+                )
+            except Exception as e:
+                logger.exception("Failed to refresh Drive token")
+                raise HTTPException(status_code=401, detail=f"Failed to refresh Drive token: {e}")
+        elif not creds.token:
+            raise HTTPException(status_code=401, detail="Stored Drive credentials are invalid or expired (no refresh token available)")
+        # else: use the current (possibly still valid) access token
+
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return service
+
 
 def list_allowed_labels(service) -> List[Dict[str, Any]]:
     """Return only the labels that are in our ALLOWED_LABELS whitelist."""
@@ -712,6 +802,237 @@ def get_expert_guidance(
     }
 
 
+# -----------------------------------------------------------------------------
+# Google Drive tools (input folder for PDFs/sources, output folder for generated howtos)
+# -----------------------------------------------------------------------------
+
+def _get_drive_file_content(service, file_id: str) -> Dict[str, Any]:
+    """Download a Drive file. For PDFs use pypdf text extraction (like Gmail attachments)."""
+    meta = service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
+    mime = meta.get("mimeType", "")
+    filename = meta.get("name", file_id)
+
+    if mime == "application/vnd.google-apps.document":
+        # Export Google Doc as plain text
+        content = service.files().export(fileId=file_id, mimeType="text/plain").execute()
+        text = content.decode("utf-8", errors="replace") if isinstance(content, (bytes, bytearray)) else content
+        return {
+            "file_id": file_id,
+            "filename": filename,
+            "mimeType": mime,
+            "text_content": text,
+            "is_google_doc": True,
+        }
+
+    # Binary file (PDF, etc.)
+    request = service.files().get_media(fileId=file_id)
+    from io import BytesIO
+    from googleapiclient.http import MediaIoBaseDownload
+
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+
+    data = fh.getvalue()
+
+    text = None
+    if mime == "application/pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(data))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            text = text.strip() if text else None
+        except Exception as e:
+            logger.warning(f"Drive PDF extraction failed for {filename}: {e}")
+
+    return {
+        "file_id": file_id,
+        "filename": filename,
+        "mimeType": mime,
+        "size": len(data),
+        "text_content": text,
+        "is_pdf": mime == "application/pdf",
+        "note": "For images or complex files use vision on the client or additional processing." if mime.startswith("image/") else None,
+    }
+
+
+@mcp.tool()
+def list_drive_files(query: str = "", max_results: int = 20, folder_id: Optional[str] = None) -> Dict[str, Any]:
+    """List files in Drive. Defaults to the configured INPUT folder if no folder_id provided.
+    Use this to discover supplemental PDFs, manuals, and sources for howtos.
+    """
+    service = get_drive_service()
+    effective_folder = folder_id or DRIVE_INPUT_FOLDER_ID or "root"
+
+    q_parts = []
+    if query:
+        q_parts.append(query)
+    if effective_folder != "root":
+        q_parts.append(f"'{effective_folder}' in parents")
+    q = " and ".join(q_parts) if q_parts else ""
+
+    results = service.files().list(
+        q=q,
+        pageSize=min(max_results, 50),
+        fields="files(id, name, mimeType, size, modifiedTime)",
+        orderBy="modifiedTime desc",
+    ).execute()
+
+    files = results.get("files", [])
+    return {
+        "folder_id": effective_folder,
+        "query": query,
+        "count": len(files),
+        "files": files,
+        "note": "Use get_drive_file(file_id) to retrieve full text (PDF extraction supported).",
+    }
+
+
+@mcp.tool()
+def get_drive_file(file_id: str) -> Dict[str, Any]:
+    """Retrieve content from a Drive file (PDF text extraction supported, Google Docs exported as text).
+    Ideal for pulling supplemental specs, diagrams descriptions, and reference material from your input folder.
+    """
+    service = get_drive_service()
+    return _get_drive_file_content(service, file_id)
+
+
+@mcp.tool()
+def save_howto_to_drive(title: str, content: str, as_pdf: bool = True, folder_id: Optional[str] = None) -> Dict[str, Any]:
+    """Save a generated howto to the configured OUTPUT Drive folder.
+    content can be Markdown or plain text. If as_pdf=True a basic PDF is created using reportlab.
+    Returns the created file metadata.
+    """
+    service = get_drive_service()
+    target_folder = folder_id or DRIVE_OUTPUT_FOLDER_ID
+    if not target_folder:
+        raise HTTPException(400, "No output folder configured (DRIVE_OUTPUT_FOLDER_ID env) and none provided.")
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import inch
+    from io import BytesIO
+    import textwrap
+    from googleapiclient.http import MediaIoBaseUpload
+
+    filename_base = title.replace(" ", "_").replace("/", "-")[:80]
+
+    if as_pdf:
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer, pagesize=letter)
+        width, height = letter
+        y = height - 0.75 * inch
+
+        # Very basic PDF renderer (title + wrapped text). For rich Markdown/tables use a full converter later.
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(0.75 * inch, y, title[:90])
+        y -= 0.4 * inch
+
+        c.setFont("Helvetica", 10)
+        for line in content.splitlines():
+            for wrapped in textwrap.wrap(line, width=95) or [""]:
+                if y < 0.6 * inch:
+                    c.showPage()
+                    y = height - 0.75 * inch
+                    c.setFont("Helvetica", 10)
+                c.drawString(0.75 * inch, y, wrapped)
+                y -= 14
+
+        c.save()
+        buffer.seek(0)
+
+        file_metadata = {
+            "name": f"{filename_base}.pdf",
+            "parents": [target_folder] if target_folder else None,
+            "mimeType": "application/pdf",
+        }
+        media = MediaIoBaseUpload(buffer, mimetype="application/pdf", resumable=True)
+    else:
+        # Save as Markdown / text
+        file_metadata = {
+            "name": f"{filename_base}.md",
+            "parents": [target_folder] if target_folder else None,
+            "mimeType": "text/markdown",
+        }
+        media = MediaIoBaseUpload(BytesIO(content.encode("utf-8")), mimetype="text/markdown", resumable=True)
+
+    created = service.files().create(body=file_metadata, media_body=media, fields="id,name,webViewLink").execute()
+
+    return {
+        "file_id": created.get("id"),
+        "name": created.get("name"),
+        "webViewLink": created.get("webViewLink"),
+        "folder": target_folder,
+        "as_pdf": as_pdf,
+        "note": "File saved to your Drive output folder. The expert can now reference it.",
+    }
+
+
+@mcp.tool()
+def list_input_manuals(model: Optional[str] = None, max_results: int = 20) -> Dict[str, Any]:
+    """List documents and manuals from the Drive input folder (Car manuals).
+
+    The input folder is organized with subfolders sorted by car model
+    (e.g. Barchetta, Khamsin, etc.).
+
+    - Call without 'model' to see top-level contents and available car model subfolders.
+    - Provide a model name (e.g. "Barchetta") to list files inside that model's folder.
+
+    Perfect for discovering PDFs, workshop manuals, torque specs, and diagrams
+    to supplement the mailing list data.
+    """
+    base_folder = DRIVE_INPUT_FOLDER_ID
+    target_folder = base_folder
+
+    if model:
+        service = get_drive_service()
+        q = (
+            f"name contains '{model}' "
+            f"and mimeType = 'application/vnd.google-apps.folder' "
+            f"and '{base_folder}' in parents"
+        )
+        res = service.files().list(
+            q=q,
+            fields="files(id, name)",
+            pageSize=5
+        ).execute()
+        folders = res.get("files", [])
+        if not folders:
+            # Fallback: list top level so user can see available models
+            top = list_drive_files(query="", max_results=10, folder_id=base_folder)
+            top["error"] = f"No subfolder matching model '{model}'"
+            top["note"] = "Subfolders are car models. List without model to see them."
+            return top
+        target_folder = folders[0]["id"]
+
+    result = list_drive_files(query="", max_results=max_results, folder_id=target_folder)
+    result["input_folder"] = base_folder
+    if model:
+        result["model"] = model
+    result["note"] = (
+        "Input folder subfolders are sorted by car model (Barchetta, Khamsin, etc.). "
+        "Use get_drive_file(file_id) to extract text from PDFs."
+    )
+    return result
+
+
+@mcp.tool()
+def save_to_guides(title: str, content: str, as_pdf: bool = True) -> Dict[str, Any]:
+    """Save a generated howto directly to the output Drive folder (Generated guides).
+
+    This is the recommended convenience tool for the expert when publishing
+    a finished professional document.
+    """
+    return save_howto_to_drive(
+        title=title,
+        content=content,
+        as_pdf=as_pdf,
+        folder_id=DRIVE_OUTPUT_FOLDER_ID
+    )
+
+
 # Keep the old search_gmail for backward compatibility (it now calls the improved logic)
 @mcp.tool()
 def search_gmail(
@@ -831,6 +1152,7 @@ def root():
           {labels}
         </div>
         <p><a href="/oauth/google/start">🔐 Connect / Reconnect Gmail (requires agent token)</a></p>
+        <p><a href="/oauth/google/drive/start">📁 Connect / Reconnect Google Drive (input PDFs + output howtos)</a></p>
         <p><small>MCP endpoint: POST /mcp &nbsp;|&nbsp; Proper transport: /mcp-transport (streamable-http)</small></p>
       </body>
     </html>
@@ -851,7 +1173,8 @@ def _oauth_client_config():
 @app.get("/oauth/google/start")
 def oauth_google_start(request: Request):
     # Protected by Cloud Run IAM (--no-allow-unauthenticated) + the invoker role granted to the owner.
-    # The agent bearer is used for /mcp tool calls, not for the owner connect flow.
+    # We also allow the AGENT_BEARER_TOKEN for convenience when using curl/scripts.
+    require_agent(request)
 
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(500, "Google OAuth credentials not configured")
@@ -923,6 +1246,105 @@ def oauth_google_callback(request: Request):
     except Exception as e:
         logger.exception("OAuth callback error")
         return HTMLResponse(f"<h1>OAuth Callback Error</h1><p>{e}</p>", status_code=500)
+
+
+# --- Google Drive OAuth flow (separate consent for Drive access) ---
+def _drive_redirect_uri():
+    base = REDIRECT_URI.rstrip("/")
+    if base.endswith("/oauth/google/callback"):
+        base = base.replace("/oauth/google/callback", "")
+    return f"{base}/oauth/google/drive/callback"
+
+
+@app.get("/oauth/google/drive/start")
+def oauth_google_drive_start(request: Request):
+    """Start Drive OAuth flow. Requires agent bearer or IAM for owner."""
+    require_agent(request)
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(500, "Google OAuth credentials not configured")
+
+    # Request Drive scopes + existing Gmail scope to encourage Google to issue a refresh_token
+    # on incremental consent.
+    drive_auth_scopes = list(set(DRIVE_SCOPES + ["https://www.googleapis.com/auth/gmail.readonly"]))
+    flow = Flow.from_client_config(_oauth_client_config(), scopes=drive_auth_scopes)
+    flow.redirect_uri = _drive_redirect_uri()
+
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+
+    oauth_states[state] = {"flow": flow, "created": now_iso(), "type": "drive"}
+    logger.info(f"🔐 Drive OAuth flow started, state={state}")
+
+    return RedirectResponse(auth_url)
+
+
+@app.get("/oauth/google/drive/callback", response_class=HTMLResponse)
+def oauth_google_drive_callback(request: Request):
+    query = request.query_params
+    state = query.get("state")
+    code = query.get("code")
+    error = query.get("error")
+
+    if error:
+        return HTMLResponse(f"<h1>Drive OAuth Error</h1><p>{error}</p>", status_code=400)
+
+    if not state or state not in oauth_states:
+        return HTMLResponse("<h1>Invalid state</h1>", status_code=400)
+
+    flow_info = oauth_states[state]
+    flow = flow_info.get("flow")
+    if not flow or flow_info.get("type") != "drive":
+        return HTMLResponse("<h1>Drive Flow not found</h1>", status_code=400)
+
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+    except Exception as fetch_err:
+        if "Scope has changed" in str(fetch_err):
+            # Incremental authorization case: Google returned a superset of scopes
+            # (Gmail scopes were previously granted for the same client).
+            # Extract the token manually from the OAuth2 session.
+            logger.warning("Handling incremental Drive auth with extra granted scopes")
+            token = flow.oauth2session.token
+            from google.oauth2.credentials import Credentials as GoogleCredentials
+            scopes = token.get("scope")
+            if isinstance(scopes, str):
+                scopes = scopes.split()
+            creds = GoogleCredentials(
+                token=token.get("access_token"),
+                refresh_token=token.get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET,
+                scopes=scopes or DRIVE_SCOPES,
+            )
+        else:
+            logger.exception("Drive OAuth callback error")
+            return HTMLResponse(f"<h1>Drive OAuth Callback Error</h1><p>{fetch_err}</p>", status_code=500)
+
+    try:
+        save_drive_tokens(creds)
+        oauth_states.pop(state, None)
+
+        return f"""
+        <html>
+          <body style="font-family: system-ui, sans-serif; margin:40px">
+            <h1 style="color:#28a745">✅ Google Drive connected successfully</h1>
+            <p>The MCP now has access to your configured Drive folders for supplemental PDFs/sources (input) and generated howtos (output).</p>
+            <p>Input folder ID: {DRIVE_INPUT_FOLDER_ID or '(not set in env)'}</p>
+            <p>Output folder ID: {DRIVE_OUTPUT_FOLDER_ID or '(not set in env)'}</p>
+            <p>You can close this window.</p>
+          </body>
+        </html>
+        """
+    except Exception as e:
+        logger.exception("Drive OAuth callback error during save")
+        return HTMLResponse(f"<h1>Drive OAuth Callback Error</h1><p>{e}</p>", status_code=500)
+
 
 # --- Legacy JSON-RPC compatibility layer (for older clients) ---
 # The primary MCP interface is now the official streamable-http transport

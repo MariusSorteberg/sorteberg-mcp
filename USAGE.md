@@ -16,8 +16,9 @@ Once connected you should see tools including:
 - `get_expert_guidance`
 - `get_message` (with `include_full_body=True` support)
 - `get_thread` (with `include_full_bodies=True` support)
-- `get_attachment`
-- `get_thread_attachments` (new — best for harvesting all diagrams/photos from a discussion)
+- `get_attachment`, `get_thread_attachments`
+- `list_input_manuals(model=None)` (new — Drive input, car-model subfolders)
+- `save_to_guides` (new — publish to output folder)
 - `fetch_link` (now extracts PDFs too)
 - etc.
 

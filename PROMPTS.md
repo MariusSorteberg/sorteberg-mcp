@@ -107,18 +107,23 @@ Then use search_mailing_list with a broader query on the same topic to find othe
 Finally use get_thread on the most useful thread IDs from both searches and synthesize the best advice while noting where people disagreed.
 ```
 
-### Handling Attachments, Photos, and Diagrams (for professional manual-style output)
+### Handling Attachments, Drive PDFs, Photos, and Diagrams (for professional manual-style output)
 
 ```text
-For any valuable thread, start by calling get_thread_attachments(thread_id). This efficiently returns every photo, diagram, PDF scan or chart from the whole discussion, with author attribution.
+For email threads, start with get_thread_attachments(thread_id).
 
-Then selectively call get_attachment on the most relevant items:
-- Images: use the base64 data + vision for descriptions. Include proper Markdown figures with captions and source attribution.
-- PDFs: use the extracted text_content (often contains torque tables or figure references).
+For the Drive input folder (organized by car model subfolders):
+- Use list_input_manuals() to see available models/folders.
+- Use list_input_manuals(model="Barchetta") to list files for a specific car.
+- Then get_drive_file(file_id) to extract text from PDFs/manuals (torque tables etc.).
 
-For external links to factory manuals or torque charts, use extract_links + fetch_link (it now extracts text from PDFs).
+For email attachments: get_attachment.
 
-When long detailed posts contain the actual numbers, call get_message(..., include_full_body=True) or get_thread(..., include_full_bodies=True) so specifications are not truncated.
+For links: extract_links + fetch_link.
+
+For long posts: include_full_bodies=True.
+
+When finished, always publish with save_to_guides(title=..., content=..., as_pdf=True).
 ```
 
 ### Creating "Living Documents"

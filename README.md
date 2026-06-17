@@ -1,6 +1,6 @@
 # Sorteberg MCP
 
-A custom Model Context Protocol (MCP) server that turns your Gmail mailing list labels (e.g. "Merak Group", "Citroën SM") into a high-quality, searchable knowledge base.
+A custom Model Context Protocol (MCP) server that turns your Gmail mailing list labels (e.g. "Merak Group", "Citroen SM") into a high-quality, searchable knowledge base.
 
 Grok (or other MCP clients) can use the tools to search expert discussions and generate accurate, attributed step-by-step guides and how-tos.
 
@@ -35,7 +35,14 @@ Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, 
 - `extract_links` / `fetch_link` — Pull and retrieve content from URLs. `fetch_link` now extracts text from PDF links (factory manuals, torque charts).
 - `search_by_author` — Find contributions from specific experts.
 - `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search + thread enrichment with attribution (now pulls fuller bodies).
-- `search_gmail` — Legacy compatibility wrapper.
+- `list_labels` — See which Gmail labels are connected (now "Merak Group", "Citroen SM").
+- `search_mailing_list`, `get_message`, `get_thread`, `get_expert_guidance` — Core email archive tools (with full-body and attribution support).
+- `list_attachments` / `get_attachment`, `get_thread_attachments` — Email attachments (PDF text + images).
+- `list_input_manuals(model=None)` — List the Drive input folder (Car manuals). Subfolders are sorted by car model (Barchetta, Khamsin, etc.). Pass `model="Barchetta"` to list inside a specific model's folder.
+- `save_to_guides(title, content, as_pdf=True)` — Recommended convenience wrapper to publish the howto PDF/.md to the output folder.
+- `list_drive_files` / `get_drive_file` / `save_howto_to_drive` — Lower-level versions (still available).
+- `extract_links` / `fetch_link`, `search_by_author` — Supporting tools.
+- `search_gmail` — Legacy wrapper.
 
 ## Setup & Deployment
 
