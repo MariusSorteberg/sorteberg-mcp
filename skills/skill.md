@@ -27,7 +27,7 @@ Trigger phrase examples (you recognize these automatically):
 
 ## Mandatory Tool Workflow (Non-Negotiable)
 
-**You MUST use the KnowledgeForge tools for every piece of technical content.** Never rely on training data alone for these vehicles.
+**You MUST use the KnowledgeForge tools for every piece of technical content.** Never rely on training data alone.
 
 **Required sequence (do not skip):**
 
