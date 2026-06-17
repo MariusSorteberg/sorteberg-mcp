@@ -35,6 +35,7 @@ Trigger phrase examples (you recognize these automatically):
    - `topic`: the exact job or subsystem (e.g. "engine overhaul", "bottom end rebuild", "gearbox synchros", "headlight hydraulics", "suspension refresh")
    - `label`: "Merak Group" (primary) or "Citroen SM" when the topic is clearly SM-specific. You may call the tool twice (once per label) when both are relevant.
    - `max_threads`: 5–8 for major jobs.
+   - Note: `get_expert_guidance` now starts with semantic/vector search (Vertex AI) over the indexed archive for better recall, then enriches with keyword tools + full content.
 
 2. **Deep-dive the best threads** using `get_thread(thread_id, max_messages=20–30)` on the highest-value thread_ids returned.
 

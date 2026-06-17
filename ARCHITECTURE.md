@@ -205,20 +205,176 @@ The AI never sees raw Gmail credentials or has unrestricted access.
 - **Why allow-unauthenticated + bearer?**  
   Makes it trivial for Grok (and other external agents) to use the server. The bearer is still a secret. For maximum security you can lock it back to pure IAM and have Grok use a properly authorized Google identity.
 
-## Current Limitations & Future Ideas
+## 7. Vector Search Layer with Vertex AI (Starting Small)
+
+To overcome the limitations of pure keyword search and lack of persistent indexing over large archives of mailing list emails and Drive documents (manuals, PDFs with specs/tables), we are adding a semantic search layer using **Google Cloud Vertex AI Vector Search**.
+
+This starts small, as suggested:
+- Manual or scheduled (Cloud Scheduler) indexing trigger.
+- Basic chunking of email threads and Drive files (with attention to preserving table structures for torque/geometry specs).
+- Embeddings generated via Vertex AI.
+- One or more indexes (e.g., separate for emails vs documents, or combined with metadata filtering).
+- New MCP tools for semantic retrieval, integrated into the expert skill for better context gathering before guide generation.
+- Hybrid approach: vector results + existing keyword tools + full content fetch for attribution.
+
+### Why Vertex AI Vector Search?
+- Fully managed, high-scale nearest-neighbor search.
+- Native integration with Vertex AI embedding models.
+- Metadata filtering (e.g., by label="Merak Group", model="Merak", date range, author).
+- Incremental updates (no full re-index every time).
+- Fits the existing Google Cloud + org setup (Cloud Run, Firestore for metadata/sync state).
+- Supports the goal of accurate, sourced technical documentation from unstructured expert data + official manuals.
+
+### High-Level Architecture Schematic
+
+```mermaid
+flowchart TD
+    subgraph Client
+        Grok[Grok Client<br/>Terminal or Web via MCP Connector]
+    end
+
+    subgraph MCP["MCP Server (Cloud Run)"]
+        direction TB
+        Tools[FastMCP Tool Layer<br/>search_mailing_list, get_expert_guidance, ...]
+        VectorTools[New Vector Tools<br/>semantic_search, hybrid_search]
+        Auth[Auth: Bearer + Cloud Run IAM]
+    end
+
+    subgraph GoogleAPIs
+        Gmail[Gmail API<br/>Labels: Merak Group, Citroen SM]
+        Drive[Google Drive API<br/>Input Folder: Car Manuals by Model<br/>Output Folder: Generated Guides]
+    end
+
+    subgraph Persistence
+        FS[Firestore<br/>Gmail/Drive tokens + Sync metadata]
+    end
+
+    subgraph VectorLayer["Vector Search Layer (Vertex AI)"]
+        Embed[Vertex AI Embeddings]
+        VS[Vertex AI Vector Search Index<br/>Chunks + Metadata]
+    end
+
+    subgraph Ingestion["Ingestion Pipeline (Cloud Run Job)"]
+        direction LR
+        Trigger[Manual Trigger Endpoint<br/>or Cloud Scheduler]
+    end
+
+    Grok -->|MCP calls e.g. get_expert_guidance| Tools
+    Tools --> VectorTools
+    Tools --> Gmail
+    Tools --> Drive
+    VectorTools --> VS
+    Auth --> FS
+
+    Trigger --> Ingestion
+    Ingestion --> Gmail
+    Ingestion --> Drive
+    Ingestion --> Embed
+    Embed --> VS
+    Ingestion -->|metadata| FS
+
+    VS -.->|enriched chunks| Tools
+    Gmail -.->|full threads/attachments| Tools
+    Drive -.->|full PDFs| Tools
+```
+
+Key data flows:
+- **Ingestion**: Fetches from Gmail/Drive → chunks → embeds → upserts to VS with rich metadata (author, date, thread/file ID, label, car model, etc.).
+- **Query**: Grok calls tool → MCP does vector search (optionally hybrid with keyword) → fetches full context via existing tools → returns attributed results to skill for guide synthesis → optional save to Drive output.
+
+### 7.1 Ingestion Flow (Manual or Scheduled Trigger)
+
+```mermaid
+sequenceDiagram
+    actor User as User / Scheduler
+    participant Ing as Ingestion Job (Cloud Run)
+    participant Gmail as Gmail API
+    participant Drive as Drive API
+    participant Embed as Vertex AI Embeddings
+    participant VS as Vertex AI Vector Search
+    participant FS as Firestore
+
+    User->>Ing: Trigger /ingest (manual or scheduled)
+    Ing->>Gmail: List + fetch new/updated messages in allowed labels
+    Gmail-->>Ing: Threads, bodies, attachments metadata
+    Ing->>Drive: List + fetch updated files in input folder (by model subfolders)
+    Drive-->>Ing: File content (PDF text via pypdf or better)
+    Ing->>Ing: Intelligent chunking (by message/thread or PDF section; preserve tables)
+    Ing->>Embed: Batch generate embeddings
+    Embed-->>Ing: Vectors + metadata
+    Ing->>VS: Upsert chunks (with filters: label, model, author, date)
+    VS-->>Ing: Success
+    Ing->>FS: Update last_sync timestamp / state
+    Ing-->>User: Status report (items indexed, errors)
+```
+
+Notes for small start:
+- Manual trigger first (protected endpoint using bearer).
+- Simple chunking (e.g., per email message or per PDF page).
+- One index initially.
+- Full re-index option for corrections.
+- Later: Pub/Sub for Gmail incremental updates, Document AI for better PDF structure.
+
+### 7.2 Typical Query Flow with Vector Search
+
+```mermaid
+sequenceDiagram
+    participant Grok as Grok Client (via skill)
+    participant MCP as MCP Server
+    participant VS as Vertex AI Vector Search
+    participant Gmail as Gmail/Drive APIs
+
+    Grok->>MCP: tools/call get_expert_guidance<br/>(topic="suspension geometry front/rear", label="Merak Group")
+    MCP->>VS: semantic_search(topic, top_k=8, filter={label: "Merak Group"})
+    VS-->>MCP: Ranked chunks + metadata (thread_ids, scores, source)
+    MCP->>Gmail: get_thread / get_drive_file for top metadata IDs
+    Gmail-->>MCP: Full content, attachments, exact text (for specs/tables)
+    MCP->>MCP: Dedup, enrich with author/date/attribution, combine with any keyword results
+    MCP-->>Grok: Structured context (relevant excerpts + full sources)
+    Grok->>Grok: Apply skill rules: tables for specs, step-by-step, pitfalls, diagrams guidance, separate private vs public sources
+    Grok->>MCP: Optional save_to_guides(guide_md)
+    MCP->>Drive: Write PDF to output folder
+    Drive-->>MCP: Confirmation
+    MCP-->>Grok: Success + link
+```
+
+This enhances `get_expert_guidance` (still the primary for the skill) while keeping all existing attribution and full-content tools.
+
+### 7.3 New/Updated Tools (Starting Small)
+
+- `semantic_search(query, label_or_folder=None, top_k=10, filters={})`: Returns top matching chunks from vector index with scores and metadata.
+- `hybrid_search(...)`: Combines vector + existing keyword search.
+- Enhanced `get_expert_guidance`: Internally calls semantic_search first for better recall, then enriches.
+- `trigger_index(manual=True)`: For manual updates.
+
+The skill.md will be updated to instruct starting with semantic tools for relevant context before full synthesis.
+
+### Integration with Existing Components
+
+- Reuses Firestore for sync state + tokens.
+- Reuses existing auth (bearer/IAM).
+- Drive input subfolders (by car model) and email labels remain the source of truth.
+- Output folder for published guides unchanged.
+- No change to Gmail/Drive OAuth or read-only nature.
+
+This is additive: keyword tools remain available for exact matches or when vector confidence is low.
+
+## Current Limitations & Future Ideas (Updated)
 
 - Full email bodies and threads can get large — truncation is now controllable per call via `include_full_bodies=True` / `include_full_body=True` (and get_expert_guidance pulls fuller content). Very large threads may still need selective follow-up.
-- No semantic/vector search yet (keyword + Gmail search only).
+- ~~No semantic/vector search yet (keyword + Gmail search only).~~ **In progress** — Vertex AI Vector Search layer added (starting small with manual/scheduled indexing).
 - Image attachments return full base64 + metadata (vision works well client-side; no server-side description yet).
 - No write access to Gmail (by design).
-- No persistent indexing of the archive (every search hits Gmail API).
+- ~~No persistent indexing of the archive (every search hits Gmail API).~~ **In progress** — Vector index + metadata for fast semantic retrieval.
 
 Possible future enhancements:
-- Background indexing + vector embeddings of threads.
-- Dedicated "knowledge base" tools.
+- Full Pub/Sub incremental indexing for Gmail.
+- Advanced chunking + Document AI for PDF structure (better table extraction for specs).
+- Hybrid search as default in `get_expert_guidance`.
 - Image description tool using a vision model.
 - Export generated guides as Markdown/PDF and attach them back to Gmail or a wiki.
 - Multi-user support (multiple owners, per-user labels).
+- Monitoring / eval for retrieval quality on technical queries.
 
 ## Security Considerations
 

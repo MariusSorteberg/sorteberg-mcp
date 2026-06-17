@@ -115,7 +115,7 @@ See `ARCHITECTURE.md` for a deeper dive.
 This project was built iteratively with Grok to solve a very specific need: making expert knowledge from old mailing lists usable again.
 
 Common next improvements people ask for:
-- Vector embeddings + semantic search over the archive
+- Vector embeddings + semantic search over the archive (Vertex AI Vector Search layer in progress - see ARCHITECTURE.md)
 - Automatic summarization / knowledge base building
 - Image description for photos attached to emails
 - Exporting generated how-tos back as nice PDFs or GitHub wiki pages
