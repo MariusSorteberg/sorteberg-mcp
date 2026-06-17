@@ -73,7 +73,7 @@ VECTOR_INDEX_ENDPOINT = os.getenv("VECTOR_INDEX_ENDPOINT", "")
 # The deployed_index_id you chose when running deploy-index (e.g. sorteberg_mcp_index)
 VECTOR_DEPLOYED_INDEX_ID = os.getenv("VECTOR_DEPLOYED_INDEX_ID", "")
 # For embeddings model
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
 
 # Firestore storage for the Gmail owner tokens (persistent, survives restarts)
 TOKEN_COLLECTION = "mcp_config"
@@ -286,7 +286,7 @@ def _init_vertex():
 
 
 def _get_embedding(text: str) -> List[float]:
-    """Generate embedding using Vertex AI text-embedding-004 (or configured model)."""
+    """Generate embedding using Vertex AI text-embedding-005 (or configured model)."""
     if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
         raise HTTPException(500, "Vertex AI Vector Search not configured (set VERTEX_PROJECT and VECTOR_INDEX_NAME)")
     _init_vertex()
@@ -440,9 +440,10 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
     return results
 
 
-def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, Any]:
+def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50) -> Dict[str, Any]:
     """Core ingest logic. Fetches recent content, chunks (preserving table-ish areas), embeds, upserts.
     Stores minimal last_sync info in Firestore.
+    Supports batching via max_messages and optional label filter for targeted ingests (e.g. only Merak Group).
     """
     summary = {"emails_indexed": 0, "drive_files_indexed": 0, "chunks": 0, "errors": []}
     try:
@@ -450,23 +451,27 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
         after_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y/%m/%d")
 
         # Gmail side
-        for label in ALLOWED_LABELS:
+        labels_to_process = [label] if label and label in ALLOWED_LABELS else ALLOWED_LABELS
+        for lbl in labels_to_process:
             try:
-                msgs = search_mailing_list(query="", label=label, max_results=80, after=after_date)
+                msgs = search_mailing_list(query="", label=lbl, max_results=min(100, max_messages * 2), after=after_date)
             except Exception as e:
-                summary["errors"].append(f"search label {label}: {str(e)[:80]}")
+                summary["errors"].append(f"search label {lbl}: {str(e)[:80]}")
                 continue
 
             # If search returned the "no results" sentinel, retry without date filter (archives may be older)
             if msgs and isinstance(msgs[0], dict) and "message" in msgs[0] and "searched_labels" in msgs[0]:
                 try:
-                    msgs = search_mailing_list(query="", label=label, max_results=80)
+                    msgs = search_mailing_list(query="", label=lbl, max_results=min(100, max_messages * 2))
                 except Exception:
                     msgs = []
 
+            processed = 0
             for msg in (msgs or []):
                 if not isinstance(msg, dict) or not msg.get("id"):
                     continue
+                if processed >= max_messages:
+                    break
                 try:
                     full = get_message(msg["id"], include_full_body=True)
                     text = full.get("body_text", "") or full.get("snippet", "")
@@ -474,7 +479,7 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
                         continue
 
                     base_meta = {
-                        "label": label,
+                        "label": lbl,
                         "source_type": "email",
                         "message_id": msg["id"],
                         "thread_id": full.get("threadId", ""),
@@ -488,6 +493,7 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7) -> Dict[str, A
                         _upsert_chunks([{"id": cid, "embedding": emb, "metadata": ch["meta"]}])
                         summary["chunks"] += 1
                     summary["emails_indexed"] += 1
+                    processed += 1
                 except Exception as e:
                     summary["errors"].append(str(e)[:100])
 
@@ -1493,14 +1499,15 @@ def hybrid_search(query: str, top_k: int = 8, label: Optional[str] = None) -> Di
 
 
 @mcp.tool()
-def trigger_ingest(manual: bool = True, days_back: int = 7) -> Dict[str, Any]:
+def trigger_ingest(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50) -> Dict[str, Any]:
     """Trigger manual or incremental indexing into the Vertex AI vector index.
-    Fetches recent content from Gmail labels and Drive input folder, chunks intelligently,
-    embeds with text-embedding-004, and upserts.
+    Fetches recent content from Gmail labels (optionally filtered to one label like "Merak Group")
+    and Drive input folder, chunks intelligently, embeds with text-embedding-005, and upserts.
+    Supports batching via max_messages to avoid long-running requests.
     For first phase / manual trigger. Returns summary of what was indexed.
     Call this periodically or on-demand (protected) to keep the vector DB fresh.
     """
-    return _trigger_ingest_impl(manual=manual, days_back=days_back)
+    return _trigger_ingest_impl(manual=manual, days_back=days_back, label=label, max_messages=max_messages)
 
 
 # Keep the old search_gmail for backward compatibility (it now calls the improved logic)
@@ -1553,16 +1560,17 @@ def debug_auth(request: Request):
 
 
 @app.post("/ingest")
-def trigger_ingest_endpoint(request: Request, days_back: int = 30):
+def trigger_ingest_endpoint(request: Request, days_back: int = 30, label: Optional[str] = None, max_messages: int = 50):
     """Manual trigger for first-phase vector indexing.
     Protected by require_agent (bearer or IAM).
+    Supports batching: use label="Merak Group" and small max_messages (e.g. 20-50) for safe incremental ingests.
     Call with bearer or via Cloud Scheduler / manually.
-    Recommended: run with small days_back first (e.g. 7-30) to test.
+    Recommended: run with small days_back + max_messages first (e.g. 7 + 30) to test.
     """
     require_agent(request)
     if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
         return {"error": "Vertex not configured. Set VERTEX_PROJECT and VECTOR_INDEX_NAME env."}
-    return _trigger_ingest_impl(manual=True, days_back=days_back)
+    return _trigger_ingest_impl(manual=True, days_back=days_back, label=label, max_messages=max_messages)
 
 # -----------------------------------------------------------------------------
 # Minimal OAuth2 endpoints for Grok / custom connector compatibility (PKCE "none")
