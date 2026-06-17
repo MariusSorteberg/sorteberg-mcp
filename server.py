@@ -391,7 +391,7 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
             response = endpoint.find_neighbors(
                 deployed_index_id=deployed_id,
                 queries=[embedding],
-                num_neighbors=min(top_k * 3, 50),  # fetch extra for client-side filtering
+                num_neighbors=min(top_k * 3, 50),
             )
             for neighbor in (response[0] if response else []):
                 raw_results.append({
@@ -409,7 +409,7 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
                     "metadata": {}
                 })
     except Exception as e:
-        logger.warning(f"Vector query error: {e}")
+        logger.warning(f"Vector query error (endpoint may still be provisioning): {e}")
         return []
 
     # Client-side filter using filters dict (e.g. {"label": "Merak Group"})
