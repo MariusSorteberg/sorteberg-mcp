@@ -1,5 +1,5 @@
 """
-Sorteberg MCP Server - Recommended Architecture
+KnowledgeForge - MCP Server for Private Archives and Expert Knowledge
 
 - FastAPI for HTTP layer and extra routes (OAuth, health, info)
 - FastMCP for clean tool definitions and schemas
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from mcp.server.fastmcp import FastMCP
@@ -40,13 +40,13 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 ALLOWED_LABELS = [
     label.strip()
-    for label in os.getenv("ALLOWED_LABELS", "Merak Group,Citroen SM").split(",")
+    for label in os.getenv("ALLOWED_LABELS", "Expert Mailing List,Technical Discussions").split(",")
     if label.strip()
 ]
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI") or os.getenv("BASE_URL", "https://sorteberg-mcp-328104254531.europe-west1.run.app")
+REDIRECT_URI = os.getenv("REDIRECT_URI") or os.getenv("BASE_URL", "https://your-knowledgeforge-service.a.run.app")
 
 # Agent / Grok authentication (proper inbound auth)
 # Caller must send: Authorization: Bearer <this token>
@@ -70,8 +70,8 @@ VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "")
 # Optional: deployed index endpoint for queries if using endpoint
 VECTOR_INDEX_ENDPOINT = os.getenv("VECTOR_INDEX_ENDPOINT", "")
-# The deployed_index_id you chose when running deploy-index (e.g. sorteberg_mcp_index)
-VECTOR_DEPLOYED_INDEX_ID = os.getenv("VECTOR_DEPLOYED_INDEX_ID", "")
+# The deployed_index_id you chose when running deploy-index (e.g. knowledge_forge_index)
+VECTOR_DEPLOYED_INDEX_ID = os.getenv("VECTOR_DEPLOYED_INDEX_ID", "knowledge_forge_index")
 # For embeddings model
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
 
@@ -85,7 +85,7 @@ oauth_states: Dict[str, Dict[str, Any]] = {}
 # -----------------------------------------------------------------------------
 # FastMCP - Proper tool definitions
 # -----------------------------------------------------------------------------
-mcp = FastMCP("sorteberg-mcp")
+mcp = FastMCP("knowledge-forge")
 
 db = firestore.Client()
 
@@ -424,7 +424,7 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
         logger.warning(f"Vector query error (endpoint may still be provisioning): {e}")
         return []
 
-    # Client-side filter using filters dict (e.g. {"label": "Merak Group"})
+    # Client-side filter using filters dict (e.g. {"label": "Expert Mailing List"})
     if filters:
         def matches(r):
             # We don't get metadata back reliably from find_neighbors in all setups.
@@ -440,64 +440,141 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
     return results
 
 
-def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50) -> Dict[str, Any]:
+def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50, before: Optional[str] = None, after: Optional[str] = None, incremental: bool = False) -> Dict[str, Any]:
     """Core ingest logic. Fetches recent content, chunks (preserving table-ish areas), embeds, upserts.
-    Stores minimal last_sync info in Firestore.
-    Supports batching via max_messages and optional label filter for targeted ingests (e.g. only Merak Group).
+    Supports exact date ranges via after=YYYY/MM/DD and before=YYYY/MM/DD (ideal for year-by-year bulk: 2026, then 2025, ...).
+    Stores persistent watermark (last_covered_date) in Firestore for "run all new data since last successful run".
+    Use incremental=True (or after not specified) to automatically start after the last successful covered date.
     """
-    summary = {"emails_indexed": 0, "drive_files_indexed": 0, "chunks": 0, "errors": []}
+    summary = {"emails_indexed": 0, "drive_files_indexed": 0, "chunks": 0, "errors": [], "range": {}}
     try:
         from datetime import timedelta
-        after_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y/%m/%d")
 
-        # Gmail side
+        # Determine after_date
+        after_date = after
+        if not after_date:
+            if incremental:
+                # Load last covered date from Firestore
+                try:
+                    rec = token_doc().get()
+                    rec_data = rec.to_dict() if rec.exists else {}
+                    last = rec_data.get("vector_last_covered_date")
+                    if last:
+                        after_date = last
+                        logger.info(f"Incremental mode: using last_covered_date={after_date}")
+                except Exception:
+                    pass
+            elif days_back and days_back > 0 and not before:
+                after_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y/%m/%d")
+
+        # Track the range we are targeting for watermark updates
+        target_after = after_date
+        target_before = before
+        summary["range"] = {"after": target_after, "before": target_before, "incremental": incremental}
+
+        # Gmail side - get service ONCE per label batch to minimize auth churn
         labels_to_process = [label] if label and label in ALLOWED_LABELS else ALLOWED_LABELS
         for lbl in labels_to_process:
             try:
-                msgs = search_mailing_list(query="", label=lbl, max_results=min(100, max_messages * 2), after=after_date)
+                service, owner = get_gmail_service()
+
+                # Proactive refresh once per batch start. Reduces "Refreshing credentials due to 401" noise
+                # and ensures a fresh access token for the duration of the (potentially long) paged ingest.
+                try:
+                    data = get_owner_record()
+                    rtoken = data.get("refresh_token")
+                    if rtoken:
+                        rcreds = Credentials(
+                            token=data.get("access_token"),
+                            refresh_token=rtoken,
+                            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+                            client_id=data.get("client_id", GOOGLE_CLIENT_ID),
+                            client_secret=data.get("client_secret", GOOGLE_CLIENT_SECRET),
+                            scopes=data.get("scopes", SCOPES),
+                        )
+                        rcreds.refresh(GoogleRequest())
+                        token_doc().set({"access_token": rcreds.token, "updated_at": now_iso()}, merge=True)
+                        service = build("gmail", "v1", credentials=rcreds, cache_discovery=False)
+                        logger.info("Proactively refreshed Gmail token at start of ingest batch (fewer 401s expected)")
+                except Exception as _re:
+                    logger.debug(f"Proactive refresh skipped or partial: {_re}")
+
+                # Resolve label id
+                labels_result = service.users().labels().list(userId="me").execute()
+                label_id = None
+                for l in labels_result.get("labels", []):
+                    if l.get("name") == lbl:
+                        label_id = l["id"]
+                        break
+                if not label_id:
+                    summary["errors"].append(f"label id not found for {lbl}")
+                    continue
+
+                # Paged walk to reach up to max_messages, using before/after for slices
+                page_token = None
+                processed = 0
+                seen = set()
+                while processed < max_messages:
+                    list_kwargs = {
+                        "userId": "me",
+                        "labelIds": [label_id],
+                        "maxResults": min(200, max(50, max_messages)),
+                    }
+                    q_parts = []
+                    if after_date:
+                        q_parts.append(f"after:{after_date}")
+                    if before:
+                        q_parts.append(f"before:{before}")
+                    if q_parts:
+                        list_kwargs["q"] = " ".join(q_parts)
+                    if page_token:
+                        list_kwargs["pageToken"] = page_token
+
+                    res = service.users().messages().list(**list_kwargs).execute()
+                    page_msgs = res.get("messages", []) or []
+                    page_token = res.get("nextPageToken")
+
+                    for m in page_msgs:
+                        mid = m.get("id")
+                        if not mid or mid in seen:
+                            continue
+                        if processed >= max_messages:
+                            break
+                        seen.add(mid)
+                        try:
+                            full = get_full_message(service, mid, max_body_chars=0)
+                            text = full.get("body_text", "") or full.get("snippet", "")
+                            if not text or len(text) < 80:
+                                processed += 1  # advance even if skipped to not loop forever on bad
+                                continue
+
+                            base_meta = {
+                                "label": lbl,
+                                "source_type": "email",
+                                "message_id": mid,
+                                "thread_id": full.get("threadId", ""),
+                                "author": (full.get("author") or {}).get("name", ""),
+                                "date": full.get("date", ""),
+                            }
+                            chunks = _chunk_text(text, base_meta)
+                            for ch in chunks:
+                                emb = _get_embedding(ch["text"])
+                                th = full.get("threadId", "") or "t"
+                                cid = f"email_{th}_{mid}_{ch['meta'].get('chunk_index', 0)}"
+                                _upsert_chunks([{"id": cid, "embedding": emb, "metadata": ch["meta"]}])
+                                summary["chunks"] += 1
+                            summary["emails_indexed"] += 1
+                            processed += 1
+                        except Exception as e:
+                            summary["errors"].append(str(e)[:100])
+
+                    if not page_token:
+                        break
             except Exception as e:
                 summary["errors"].append(f"search label {lbl}: {str(e)[:80]}")
                 continue
 
-            # If search returned the "no results" sentinel, retry without date filter (archives may be older)
-            if msgs and isinstance(msgs[0], dict) and "message" in msgs[0] and "searched_labels" in msgs[0]:
-                try:
-                    msgs = search_mailing_list(query="", label=lbl, max_results=min(100, max_messages * 2))
-                except Exception:
-                    msgs = []
-
-            processed = 0
-            for msg in (msgs or []):
-                if not isinstance(msg, dict) or not msg.get("id"):
-                    continue
-                if processed >= max_messages:
-                    break
-                try:
-                    full = get_message(msg["id"], include_full_body=True)
-                    text = full.get("body_text", "") or full.get("snippet", "")
-                    if not text or len(text) < 80:
-                        continue
-
-                    base_meta = {
-                        "label": lbl,
-                        "source_type": "email",
-                        "message_id": msg["id"],
-                        "thread_id": full.get("threadId", ""),
-                        "author": (full.get("author") or {}).get("name", ""),
-                        "date": full.get("date", ""),
-                    }
-                    chunks = _chunk_text(text, base_meta)
-                    for ch in chunks:
-                        emb = _get_embedding(ch["text"])
-                        cid = f"email_{msg['id']}_{ch['meta'].get('chunk_index', 0)}"
-                        _upsert_chunks([{"id": cid, "embedding": emb, "metadata": ch["meta"]}])
-                        summary["chunks"] += 1
-                    summary["emails_indexed"] += 1
-                    processed += 1
-                except Exception as e:
-                    summary["errors"].append(str(e)[:100])
-
-        # Drive input side - now traverses car model subfolders
+        # Drive input side - now traverses category subfolders (e.g. by model or equipment type)
         if DRIVE_INPUT_FOLDER_ID:
             try:
                 top_resp = list_drive_files(query="", max_results=50, folder_id=DRIVE_INPUT_FOLDER_ID)
@@ -549,9 +626,19 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optiona
                 except Exception as e:
                     summary["errors"].append(str(e)[:100])
 
-        # Record last sync
+        # Record last sync + watermark for incremental "since last successful run"
         try:
-            token_doc().set({"vector_last_ingest": now_iso(), "vector_ingest_summary": summary}, merge=True)
+            now_str = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+            update = {
+                "vector_last_ingest": now_iso(),
+                "vector_ingest_summary": summary,
+                "vector_last_range": {"after": target_after, "before": target_before},
+            }
+            # Advance the covered date if this run touched "recent" data (no restrictive before or the before is in the future)
+            # This enables reliable "run all new data since last successful run".
+            if not target_before or target_before >= now_str:
+                update["vector_last_covered_date"] = now_str
+            token_doc().set(update, merge=True)
         except Exception:
             pass
 
@@ -561,6 +648,16 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optiona
         logger.exception("Ingest failed")
         summary["errors"].append(str(e)[:200])
         return summary
+
+
+def _do_ingest(days_back: int, label: Optional[str], max_messages: int, before: Optional[str] = None, after: Optional[str] = None, incremental: bool = False):
+    """Background task to perform the ingest so the HTTP request returns quickly."""
+    logger.info(f"Starting background ingest: days_back={days_back}, label={label}, max_messages={max_messages}, before={before}, after={after}, incremental={incremental}")
+    try:
+        result = _trigger_ingest_impl(manual=True, days_back=days_back, label=label, max_messages=max_messages, before=before, after=after, incremental=incremental)
+        logger.info(f"Background ingest completed: {result}")
+    except Exception as e:
+        logger.exception(f"Background ingest failed: {e}")
 
 
 def list_allowed_labels(service) -> List[Dict[str, Any]]:
@@ -805,7 +902,7 @@ def fetch_url(url: str, max_chars: int = 12000) -> Dict[str, Any]:
     try:
         import httpx
         with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            resp = client.get(url, headers={"User-Agent": "Sorteberg-MCP/1.0"})
+            resp = client.get(url, headers={"User-Agent": "KnowledgeForge/1.0"})
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "") or ""
             final_url = str(resp.url)
@@ -1059,9 +1156,25 @@ def get_expert_guidance(
             tid = meta.get("thread_id") or meta.get("message_id")
             if not tid:
                 if rid.startswith("email_"):
-                    # strip trailing _chunk
-                    base = rid.split("_", 2)[1] if "_" in rid else rid.replace("email_", "")
-                    tid = base.split("_")[0] if "_" in base else base
+                    # New format: email_{thread}_{msg}_{chunk} or old: email_{msg}_{chunk}
+                    parts = rid.split("_")
+                    if len(parts) >= 4 and parts[0] == "email":
+                        # email_thread_msg_chunk
+                        tid = parts[1]
+                    else:
+                        # strip trailing _chunk
+                        base = rid.split("_", 2)[1] if "_" in rid else rid.replace("email_", "")
+                        tid = base.split("_")[0] if "_" in base else base
+            # If we only have a message_id from the chunk (common for vector results since metadata not returned),
+            # resolve it to the real threadId so get_thread works.
+            if rid.startswith("email_") and tid:
+                try:
+                    msg_dict = get_full_message(service, tid, max_body_chars=0)
+                    resolved = msg_dict.get("threadId") or msg_dict.get("thread_id")
+                    if resolved:
+                        tid = resolved
+                except Exception as ex:
+                    logger.debug(f"Vector result: could not resolve threadId for msg {tid}: {ex}")
             if tid and tid not in seen_thread_ids:
                 seen_thread_ids.add(tid)
                 try:
@@ -1073,6 +1186,7 @@ def get_expert_guidance(
                                 "thread_id": tid,
                                 "messages": thread,
                                 "search_query_used": "vector_semantic",
+                                "source": "vector",
                                 "score": vr.get("score"),
                             })
                 except Exception as e:
@@ -1108,6 +1222,7 @@ def get_expert_guidance(
                                     "thread_id": tid,
                                     "messages": thread,
                                     "search_query_used": q,
+                                    "source": "keyword",
                                 })
                         except Exception as e:
                             logger.warning(f"Failed to fetch thread {tid}: {e}")
@@ -1126,13 +1241,24 @@ def get_expert_guidance(
             if len(unique_threads) >= max_threads:
                 break
 
+    # Compute provenance summary
+    vector_count = sum(1 for t in unique_threads if t.get("source") == "vector")
+    keyword_count = sum(1 for t in unique_threads if t.get("source") == "keyword")
+
     return {
         "topic": topic,
         "label": label or "all allowed labels",
         "mailbox_owner": owner.get("email", ""),
         "threads_found": len(unique_threads),
+        "vector_threads": vector_count,
+        "keyword_threads": keyword_count,
         "threads": unique_threads,
-        "note": "Each thread contains full messages with author names, dates, bodies, links and attachments. Use this to build accurate how-to guides with proper attribution to list experts.",
+        "note": "Each thread contains full messages with author names, dates, bodies, links and attachments. Use this to build accurate how-to guides with proper attribution to list experts. 'source' field indicates whether the thread was primarily surfaced via vector search or keyword search.",
+        "provenance_summary": {
+            "vector": vector_count,
+            "keyword": keyword_count,
+            "total": len(unique_threads)
+        }
     }
 
 
@@ -1383,13 +1509,13 @@ def save_howto_to_drive(title: str, content: str, as_pdf: bool = True, folder_id
 
 @mcp.tool()
 def list_input_manuals(model: Optional[str] = None, max_results: int = 20) -> Dict[str, Any]:
-    """List documents and manuals from the Drive input folder (Car manuals).
+    """List documents and manuals from the Drive input folder (technical manuals).
 
-    The input folder is organized with subfolders sorted by car model
-    (e.g. Barchetta, Khamsin, etc.).
+    The input folder is organized with subfolders sorted by category
+    (e.g. Engine, Chassis, etc.).
 
-    - Call without 'model' to see top-level contents and available car model subfolders.
-    - Provide a model name (e.g. "Barchetta") to list files inside that model's folder.
+    - Call without 'model' to see top-level contents and available subfolders.
+    - Provide a category name (e.g. "Engine") to list files inside that subfolder.
 
     Perfect for discovering PDFs, workshop manuals, torque specs, and diagrams
     to supplement the mailing list data.
@@ -1414,7 +1540,7 @@ def list_input_manuals(model: Optional[str] = None, max_results: int = 20) -> Di
             # Fallback: list top level so user can see available models
             top = list_drive_files(query="", max_results=10, folder_id=base_folder)
             top["error"] = f"No subfolder matching model '{model}'"
-            top["note"] = "Subfolders are car models. List without model to see them."
+            top["note"] = "Subfolders are categories (e.g. by model or equipment type). List without model to see them."
             return top
         target_folder = folders[0]["id"]
 
@@ -1423,7 +1549,7 @@ def list_input_manuals(model: Optional[str] = None, max_results: int = 20) -> Di
     if model:
         result["model"] = model
     result["note"] = (
-        "Input folder subfolders are sorted by car model (Barchetta, Khamsin, etc.). "
+        "Input folder subfolders are sorted by category (e.g. Engine, Chassis). "
         "Use get_drive_file(file_id) to extract text from PDFs."
     )
     return result
@@ -1499,15 +1625,40 @@ def hybrid_search(query: str, top_k: int = 8, label: Optional[str] = None) -> Di
 
 
 @mcp.tool()
-def trigger_ingest(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50) -> Dict[str, Any]:
+def trigger_ingest(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50, before: Optional[str] = None, after: Optional[str] = None, incremental: bool = False) -> Dict[str, Any]:
     """Trigger manual or incremental indexing into the Vertex AI vector index.
-    Fetches recent content from Gmail labels (optionally filtered to one label like "Merak Group")
-    and Drive input folder, chunks intelligently, embeds with text-embedding-005, and upserts.
-    Supports batching via max_messages to avoid long-running requests.
-    For first phase / manual trigger. Returns summary of what was indexed.
-    Call this periodically or on-demand (protected) to keep the vector DB fresh.
+    Supports exact date ranges with after=YYYY/MM/DD and before=YYYY/MM/DD (perfect for year-by-year: after=2026/01/01 before=2027/01/01).
+    Use incremental=True to automatically process only data newer than the last successful covered date (stored in Firestore).
+    Returns summary with emails_indexed so you can verify success and decide when a year slice is "done".
     """
-    return _trigger_ingest_impl(manual=manual, days_back=days_back, label=label, max_messages=max_messages)
+    return _trigger_ingest_impl(manual=manual, days_back=days_back, label=label, max_messages=max_messages, before=before, after=after, incremental=incremental)
+
+
+@mcp.tool()
+def get_ingest_status(label: Optional[str] = None) -> Dict[str, Any]:
+    """Returns the last ingest watermark, covered date, and summary.
+    Use this after a year slice (or incremental run) to verify success (emails_indexed, errors, range processed).
+    The vector_last_covered_date is what incremental=True will use as the starting 'after' for new data.
+    """
+    try:
+        rec = token_doc().get()
+        data = rec.to_dict() if rec.exists else {}
+        status = {
+            "vector_last_ingest": data.get("vector_last_ingest"),
+            "vector_last_covered_date": data.get("vector_last_covered_date"),
+            "last_range": data.get("vector_last_range"),
+            "last_summary": data.get("vector_ingest_summary"),
+        }
+        # Also surface current index size if possible (best effort)
+        try:
+            import google.cloud.aiplatform as aiplatform
+            idx = aiplatform.MatchingEngineIndex(index_name=VECTOR_INDEX_NAME)
+            status["index_vectors_count"] = getattr(getattr(idx, "index_stats", None), "vectors_count", None)
+        except Exception:
+            pass
+        return status
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # Keep the old search_gmail for backward compatibility (it now calls the improved logic)
@@ -1523,7 +1674,7 @@ def search_gmail(
 # -----------------------------------------------------------------------------
 # FastAPI App + Routes (OAuth + compatibility JSON-RPC + health)
 # -----------------------------------------------------------------------------
-app = FastAPI(title="Sorteberg MCP", version="0.2.0")
+app = FastAPI(title="KnowledgeForge", version="0.2.0")
 
 @app.middleware("http")
 async def mcp_auth_middleware(request: Request, call_next):
@@ -1544,7 +1695,7 @@ async def mcp_auth_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "sorteberg-mcp", "allowed_labels": ALLOWED_LABELS}
+    return {"status": "healthy", "service": "knowledge-forge", "allowed_labels": ALLOWED_LABELS}
 
 
 @app.get("/debug/auth")
@@ -1560,17 +1711,27 @@ def debug_auth(request: Request):
 
 
 @app.post("/ingest")
-def trigger_ingest_endpoint(request: Request, days_back: int = 30, label: Optional[str] = None, max_messages: int = 50):
-    """Manual trigger for first-phase vector indexing.
-    Protected by require_agent (bearer or IAM).
-    Supports batching: use label="Merak Group" and small max_messages (e.g. 20-50) for safe incremental ingests.
-    Call with bearer or via Cloud Scheduler / manually.
-    Recommended: run with small days_back + max_messages first (e.g. 7 + 30) to test.
+def trigger_ingest_endpoint(request: Request, background_tasks: BackgroundTasks, days_back: int = 30, label: Optional[str] = None, max_messages: int = 50, before: Optional[str] = None, after: Optional[str] = None, incremental: bool = False):
+    """Manual trigger for vector indexing (year-by-year bulk or incremental).
+    Protected by require_agent.
+    Use after=2026/01/01&before=2027/01/01 to process a full year (repeat with high max_messages until emails_indexed drops to near zero for that slice).
+    Then move to previous year (2025, 2024, ...).
+    Use incremental=true (after last bulk done) to only ingest new mail since the last successful run (watermark stored automatically).
+    The call returns immediately; check logs or get_ingest_status() for the summary to verify success.
     """
     require_agent(request)
     if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
         return {"error": "Vertex not configured. Set VERTEX_PROJECT and VECTOR_INDEX_NAME env."}
-    return _trigger_ingest_impl(manual=True, days_back=days_back, label=label, max_messages=max_messages)
+    background_tasks.add_task(_do_ingest, days_back, label, max_messages, before, after, incremental)
+    return {
+        "status": "ingest started in background",
+        "days_back": days_back,
+        "label": label,
+        "max_messages": max_messages,
+        "after": after,
+        "before": before,
+        "incremental": incremental
+    }
 
 # -----------------------------------------------------------------------------
 # Minimal OAuth2 endpoints for Grok / custom connector compatibility (PKCE "none")
@@ -1637,7 +1798,7 @@ def root():
         <style>body {{ font-family: system-ui, sans-serif; margin: 40px; line-height: 1.5; }}</style>
       </head>
       <body>
-        <h1>🚀 Sorteberg MCP Server</h1>
+        <h1>🚀 KnowledgeForge</h1>
         <p><strong>Status:</strong> ✅ Running (FastMCP + Firestore)</p>
         <div style="background:#e3f2fd;padding:15px;border-radius:6px;margin:20px 0">
           <h3>📧 Allowed Gmail Labels</h3>
@@ -1865,13 +2026,13 @@ async def mcp_jsonrpc(request: Request):
     try:
         if method == "hello":
             name = params.get("name", "user")
-            result = f"Hei {name}! Sorteberg MCP (FastMCP + Firestore) is working."
+            result = f"Hei {name}! KnowledgeForge (MCP server for private archives) is working."
 
         elif method == "initialize":
             result = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "sorteberg-mcp", "version": "0.2.0"},
+                "serverInfo": {"name": "knowledge-forge", "version": "0.2.0"},
             }
 
         elif method == "tools/list":
@@ -1936,7 +2097,7 @@ async def mcp_jsonrpc(request: Request):
 
 # Mount the official modern MCP transport (streamable-http) for proper remote MCP clients.
 # This is the recommended endpoint for Grok web client and other modern MCP clients.
-# Connect Grok to: https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/mcp
+# Connect Grok to: https://your-knowledgeforge-service.a.run.app/mcp  # (update after deploy)
 try:
     mcp_http_app = mcp.streamable_http_app()
     app.mount("/mcp", mcp_http_app)
@@ -1956,7 +2117,7 @@ except Exception:
 def main():
     import uvicorn
     port = int(os.getenv("PORT", 8080))
-    logger.info(f"🚀 Starting Sorteberg MCP on port {port}")
+    logger.info(f"🚀 Starting KnowledgeForge on port {port}")
     logger.info(f"Allowed labels: {ALLOWED_LABELS}")
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
 

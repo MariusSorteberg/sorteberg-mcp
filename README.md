@@ -1,8 +1,8 @@
-# Sorteberg MCP
+# KnowledgeForge
 
-A custom Model Context Protocol (MCP) server that turns your Gmail mailing list labels (e.g. "Merak Group", "Citroen SM") into a high-quality, searchable knowledge base.
+A custom Model Context Protocol (MCP) server that turns your Gmail mailing list labels and Google Drive documents into a high-quality, searchable expert knowledge base.
 
-Grok (or other MCP clients) can use the tools to search expert discussions and generate accurate, attributed step-by-step guides and how-tos.
+Grok (or other MCP clients) can use the tools to search expert discussions from your private archives and generate accurate, attributed step-by-step guides and how-tos.
 
 ## Key Features
 
@@ -19,8 +19,8 @@ Grok (or other MCP clients) can use the tools to search expert discussions and g
 
 Your mailing lists contain thousands of emails with goldmine-level technical knowledge from real experts. Instead of manually digging through archives, connect this MCP to Grok and ask things like:
 
-- "Create a complete step-by-step guide for overhauling the Merak engine, with tips and warnings from the experts on the list. Attribute every piece of advice."
-- "Using the Merak Group archive, build a troubleshooting guide for headlight hydraulics including photos and common mistakes mentioned by owners."
+- "Create a complete step-by-step guide for overhauling the engine, with tips and warnings from the experts on the list. Attribute every piece of advice."
+- "Build a troubleshooting guide for a hydraulic system including photos and common mistakes mentioned by owners."
 
 Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, `fetch_link`, `get_expert_guidance`, etc.) to gather the best information and produce a well-sourced document.
 
@@ -31,14 +31,11 @@ Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, 
 - `get_message` — Full details of one email. Supports `include_full_body=True` for long untruncated posts (essential for detailed specs).
 - `get_thread` — Entire conversation thread for context. Supports `include_full_bodies=True`.
 - `list_attachments` / `get_attachment` — Handle files attached to messages (PDF text extraction + image base64 for vision).
-- `get_thread_attachments(thread_id)` — **New**: Collects *all* photos, diagrams, and PDFs from an entire thread with author/message context. Ideal for richly illustrated guides.
-- `extract_links` / `fetch_link` — Pull and retrieve content from URLs. `fetch_link` now extracts text from PDF links (factory manuals, torque charts).
+- `get_thread_attachments(thread_id)` — Collects *all* photos, diagrams, and PDFs from an entire thread with author/message context. Ideal for richly illustrated guides.
+- `extract_links` / `fetch_link` — Pull and retrieve content from URLs. `fetch_link` extracts text from PDF links (factory manuals, torque charts).
 - `search_by_author` — Find contributions from specific experts.
-- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search + thread enrichment with attribution (now pulls fuller bodies).
-- `list_labels` — See which Gmail labels are connected (now "Merak Group", "Citroen SM").
-- `search_mailing_list`, `get_message`, `get_thread`, `get_expert_guidance` — Core email archive tools (with full-body and attribution support).
-- `list_attachments` / `get_attachment`, `get_thread_attachments` — Email attachments (PDF text + images).
-- `list_input_manuals(model=None)` — List the Drive input folder (Car manuals). Subfolders are sorted by car model (Barchetta, Khamsin, etc.). Pass `model="Barchetta"` to list inside a specific model's folder.
+- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search (vector + keyword) + thread enrichment with attribution (pulls fuller bodies).
+- `list_input_manuals(model=None)` — List the Drive input folder (technical manuals/docs). Subfolders may be sorted by model or category. Pass `model="Engine"` to list inside a specific folder.
 - `save_to_guides(title, content, as_pdf=True)` — Recommended convenience wrapper to publish the howto PDF/.md to the output folder. Filenames are timestamped (e.g. Title_2026-06-17_12-34-56.pdf) to prevent duplicates.
 - `list_drive_files` / `get_drive_file` / `save_howto_to_drive` — Lower-level versions (still available).
 - `extract_links` / `fetch_link`, `search_by_author` — Supporting tools.
@@ -59,7 +56,7 @@ Tokens are stored securely in Firestore with automatic refresh. The AI client ne
 In the Grok web interface:
 
 1. Add a **Custom Connector** / MCP server.
-2. **MCP Server URL**: `https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/mcp`
+2. **MCP Server URL**: `https://your-knowledgeforge-service.a.run.app/mcp`
 3. Use the OAuth flow (the server provides minimal `/oauth/authorize` and `/oauth/token` endpoints using "none" PKCE for convenience).
 4. After connection, Grok will have access to `search_mailing_list`, `get_expert_guidance`, etc.
 

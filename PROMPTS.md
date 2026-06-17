@@ -1,4 +1,4 @@
-# Effective Prompts for the Sorteberg MCP + Grok
+# Effective Prompts for the KnowledgeForge + Grok
 
 This document contains battle-tested prompt patterns for turning the mailing list archive into excellent technical documentation.
 
@@ -13,11 +13,11 @@ Grok works best when you tell it exactly which tools to use and how you want the
 ## Primary Prompt Template (Recommended)
 
 ```text
-You have access to the Sorteberg MCP which contains the Merak Group mailing list archive.
+You have access to the KnowledgeForge which contains your expert mailing list archives.
 
 Use the get_expert_guidance tool with:
 - topic: "<your topic here>"
-- label: "Merak Group"
+- label: "Expert Mailing List"
 - max_threads: 6
 
 Then, using only the threads and messages returned (and get_thread_attachments + get_attachment where visuals or PDFs are present, plus include_full_bodies where long detailed posts are involved), produce a complete, well-structured technical guide.
@@ -51,7 +51,7 @@ Pull at least 5-6 threads. Create a complete project guide including:
 ### Troubleshooting / Diagnostic Guides
 
 ```text
-Search the Merak Group label for discussions about [symptom, e.g. "won't start when hot" or "clunk from rear on overrun"].
+Search the expert mailing list label for discussions about [symptom, e.g. "won't start when hot" or "clunk from rear on overrun"].
 
 Use a combination of search_mailing_list and get_thread to gather the best diagnostic threads.
 
@@ -114,7 +114,7 @@ For email threads, start with get_thread_attachments(thread_id).
 
 For the Drive input folder (organized by car model subfolders):
 - Use list_input_manuals() to see available models/folders.
-- Use list_input_manuals(model="Barchetta") to list files for a specific car.
+- Use list_input_manuals(model="Engine") to list files for a specific category.
 - Then get_drive_file(file_id) to extract text from PDFs/manuals (torque tables etc.).
 
 For email attachments: get_attachment.
@@ -139,13 +139,13 @@ At the end, include a "Sources & Further Reading" section that lists the most va
 This style often yields better results than generic "explain to a beginner":
 
 ```text
-Assume I have mechanical experience but have never worked on a Merak before. 
-Find the explanations and gotchas that experienced Merak/Citroën SM owners wish someone had told them before they started [task].
+Assume I have technical experience but have never worked on this system before. 
+Find the explanations and gotchas that experienced owners wish someone had told them before they started [task].
 ```
 
 ---
 
-## Prompts for Specific Common Jobs on the Merak
+## Prompts for Specific Common Jobs
 
 (Adapt these with the actual topic names)
 
@@ -181,12 +181,12 @@ Focus on what actually works in practice according to people who have done multi
 - Keep a small document of "known good search terms" that have worked well for certain topics.
 - When you discover a particularly clear and thorough poster, note their name and use `search_by_author` on them for related topics.
 - After Grok produces a guide, read the key source threads yourself. The combination of AI synthesis + your own reading is extremely powerful.
-- If a topic has very few good threads, ask Grok to also search with related spellings and related cars (e.g. Merak + Bora + Khamsin sometimes share parts and techniques).
+- If a topic has very few good threads, ask Grok to also search with related terms (e.g. similar models or systems that share parts and techniques).
 
 ## Example Full Conversation Flow
 
 **You:**
-Use get_expert_guidance on "headlight hydraulics" with label="Merak Group".
+Use get_expert_guidance on "headlight hydraulics" with label="Expert Mailing List".
 
 **Grok** (after using the tool) returns several threads + a draft guide.
 

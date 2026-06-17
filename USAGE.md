@@ -1,13 +1,13 @@
-# Using the Sorteberg MCP with Grok
+# Using the KnowledgeForge with Grok
 
-This document contains practical guidance and prompt patterns for getting the most value out of the Merak Group / Citroën SM mailing list archives through the MCP.
+This document contains practical guidance and prompt patterns for getting the most value out of your expert mailing list archives through the MCP.
 
 ## Connecting (Grok Web Client)
 
 1. In Grok, open the **Custom Connectors** / MCP settings.
 2. Add a new connector:
-   - **Name**: `Sorteberg Merak MCP`
-   - **URL**: `https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/mcp`
+   - **Name**: `KnowledgeForge MCP`
+   - **URL**: `https://your-knowledgeforge-service.a.run.app/mcp`
 3. Complete the OAuth flow (the server supports the "none / PKCE only" public client flow). Grok will receive the agent bearer token automatically.
 4. (Optional) You can also connect using a raw Bearer token if your client supports it directly.
 
@@ -29,8 +29,8 @@ Use **`get_expert_guidance`** first. It is specifically designed for this use ca
 
 **Example prompt:**
 ```
-Use get_expert_guidance on the Merak Group label with the topic "overhaul the engine" (max_threads=6). 
-Then use the returned threads to create a complete, well-structured step-by-step guide for someone doing a full engine overhaul on a Merak. 
+Use get_expert_guidance on your expert mailing list label with the topic "overhaul the engine" (max_threads=6). 
+Then use the returned threads to create a complete, well-structured step-by-step guide for someone doing a full engine overhaul. 
 Include:
 - Safety warnings mentioned by multiple people
 - Tools and special parts that are commonly needed
@@ -44,7 +44,7 @@ Break it down manually:
 
 1. **Discovery**
    ```
-   Use search_mailing_list with label="Merak Group", query='engine overhaul OR "engine rebuild" OR "bottom end"', max_results=12, author="" (or a known expert).
+   Use search_mailing_list with label="Expert Mailing List", query='engine overhaul OR "engine rebuild" OR "bottom end"', max_results=12, author="" (or a known expert).
    ```
 
 2. **Deep context**
@@ -91,8 +91,8 @@ Create the guide in this structure:
 
 ## Example Real-World Prompts
 
-- "Using only information from the Merak Group label, produce a complete guide to replacing the headlight hydraulic switch, including photos references, torque specs if mentioned, and who recommended each method."
-- "I want to do a full suspension refresh on my Merak. Search the list for the best order of operations, recommended bushings/brands, and any gotchas with the geometry. Build a project plan with estimated time per step."
+- "Using only information from the expert mailing list label, produce a complete guide to replacing the hydraulic switch, including photo references, torque specs if mentioned, and who recommended each method."
+- "I want to do a full suspension refresh. Search the list for the best order of operations, recommended components, and any gotchas. Build a project plan with estimated time per step."
 - "Create a troubleshooting flowchart for when the car won't start, based on what experienced owners have posted over the years. Include the diagnostic steps they recommend and what fixed it for them."
 
 ## Tips for Better Results

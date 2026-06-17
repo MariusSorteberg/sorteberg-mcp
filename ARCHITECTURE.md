@@ -1,8 +1,8 @@
-# Sorteberg MCP Architecture
+# KnowledgeForge Architecture
 
 ## High-Level Overview
 
-The Sorteberg MCP is a remote Model Context Protocol server that gives AI agents (primarily Grok) controlled, read-only access to specific Gmail labels containing valuable technical mailing list archives.
+The KnowledgeForge is a remote Model Context Protocol server that gives AI agents (primarily Grok) controlled, read-only access to specific Gmail labels containing valuable technical mailing list archives.
 
 Instead of the AI having direct Gmail access, it gets a curated set of tools that can search, retrieve threads, attachments, and external links — all while the owner’s credentials stay safely on the server.
 
@@ -35,7 +35,7 @@ All results are designed to be rich in attribution (author name/email, date, mes
 ### 3. Authentication Layers (Defense in Depth)
 1. **Cloud Run IAM** (`--no-allow-unauthenticated` + `roles/run.invoker`)
    - Controls who can even reach the service.
-   - Owner (`marius@sorteberg.no`) has explicit invoker rights.
+   - Owner has explicit invoker rights.
    - Can be opened to `allUsers` when you want easy bearer-token access for Grok.
 
 2. **Application-level Bearer Token**
@@ -54,7 +54,7 @@ This flow is performed once (or when the owner needs to re-authorize). The goal 
 
 ```mermaid
 sequenceDiagram
-    participant Owner as Owner (Browser, logged in as marius@sorteberg.no)
+    participant Owner as Owner (Browser)
     participant MCP as MCP Server (Cloud Run)
     participant Google as accounts.google.com (OAuth)
     participant FS as Firestore (mcp_config/gmail_owner)
@@ -114,13 +114,13 @@ Key points:
 
 ## Using the MCP from the Grok Web Client
 
-The Sorteberg MCP is designed to integrate directly with the Grok web client (at grok.x.ai or via the X platform) using the built-in Custom Connectors feature. This allows Grok to discover and call your mailing list search tools natively during conversations, without any manual copying of emails or tokens.
+The KnowledgeForge is designed to integrate directly with the Grok web client (at grok.x.ai or via the X platform) using the built-in Custom Connectors feature. This allows Grok to discover and call your mailing list search tools natively during conversations, without any manual copying of emails or tokens.
 
 ### Adding the Custom Connector
 
 1. In the Grok web interface, go to the settings or connectors section and select the option to add a new Custom Connector (sometimes labeled as "MCP server" or "Custom tool provider").
 
-2. Enter a descriptive name for the connector, such as "Sorteberg Merak Gmail MCP".
+2. Enter a descriptive name for the connector, such as "KnowledgeForge Gmail MCP".
 
 3. Set the MCP server URL to the primary endpoint that serves the official streamable-http transport:
    ```
@@ -145,23 +145,23 @@ After a successful connection, the following tools from your MCP become availabl
 - `get_expert_guidance` — a specialized tool that retrieves enriched, expert-sourced discussions suitable for building how-tos (pulls fuller bodies for specs).
 - Supporting tools such as `get_message` (with full-body option), `get_thread` (with full-bodies option), `list_attachments`, `get_attachment`, `get_thread_attachments` (new: all visuals from a thread), `extract_links`, `fetch_link` (now PDF-aware), `search_by_author`, and `list_labels`.
 
-Grok can call these tools in the background when you reference your connected data. For example, it might use `search_mailing_list` with a query focused on your "Merak Group" label, then follow up with `get_thread` or `get_expert_guidance` to gather full context and author-attributed advice.
+Grok can call these tools in the background when you reference your connected data. For example, it might use `search_mailing_list` with a query focused on your expert mailing list label, then follow up with `get_thread` or `get_expert_guidance` to gather full context and author-attributed advice.
 
 ### Example Usage in Grok Conversations
 
 You can prompt Grok directly in the web client to leverage the MCP:
 
-- "Using my Sorteberg MCP (Merak Group label), search for expert discussions on overhauling the engine and create a detailed, step-by-step how-to guide with tips, warnings, and attributions to specific posts or authors from the list."
+- "Using my KnowledgeForge (expert mailing list label), search for expert discussions on overhauling the engine and create a detailed, step-by-step how-to guide with tips, warnings, and attributions to specific posts or authors from the list."
 - "From the connected mailing list tools, pull the best advice on gearbox issues and format it as a troubleshooting guide with sources."
 - "Help me generate a comprehensive writeup on headlight hydraulics by querying the MCP tools for relevant threads and attachments."
 
-Grok will handle tool selection, parameter construction (including label restrictions), and synthesis of the results into a coherent response. You don't need to know the exact tool names or query syntax — natural language is usually sufficient, especially when you mention "my MCP", "Sorteberg connector", or the specific label.
+Grok will handle tool selection, parameter construction (including label restrictions), and synthesis of the results into a coherent response. You don't need to know the exact tool names or query syntax — natural language is usually sufficient, especially when you mention "my MCP", "KnowledgeForge connector", or the specific label.
 
 ### Best Practices and Notes
 
-- Be specific in your prompts about the label (e.g., "Merak Group") and the type of output you want (structured steps, expert quotes, warnings, etc.). This helps Grok choose the right tools and parameters.
+- Be specific in your prompts about the label (e.g., "Expert Mailing List") and the type of output you want (structured steps, expert quotes, warnings, etc.). This helps Grok choose the right tools and parameters.
 - The MCP connection gives Grok read-only access only to the results of the tools — your actual email content and Gmail credentials remain on the server side and are never exposed.
-- If tools don't appear immediately after adding the connector, try starting a new conversation or refreshing the page. You can also ask Grok explicitly: "List the tools available from my Sorteberg MCP connector."
+- If tools don't appear immediately after adding the connector, try starting a new conversation or refreshing the page. You can also ask Grok explicitly: "List the tools available from my KnowledgeForge connector."
 - The connector uses the modern MCP transport, so Grok gets full support for the rich tool schemas (including descriptions that help it decide when and how to call each one).
 - For ongoing use, the connection persists across sessions. You can manage or remove the connector from Grok's settings at any time.
 - If you need to re-authorize the connector (e.g., after token expiration), simply re-run the OAuth step in the connector configuration.
@@ -182,7 +182,7 @@ This setup turns your unstructured email archives into a live, queryable knowled
 
 ## Data Flow for a Typical "Create How-To" Request
 
-1. User (in Grok web) asks something like: "Using the Merak Group list, create a complete guide for overhauling the engine with tips from the experts."
+1. User (in Grok web) asks something like: "Using the expert mailing list, create a complete guide for overhauling the engine with tips from the experts."
 2. Grok decides to call `get_expert_guidance` (or a combination of `search_mailing_list` + `get_thread`).
 3. Request goes to the MCP server (authenticated with the bearer token obtained during connector setup).
 4. Server calls Gmail API (using the stored owner refresh token).
@@ -220,7 +220,7 @@ This starts small, as suggested:
 ### Why Vertex AI Vector Search?
 - Fully managed, high-scale nearest-neighbor search.
 - Native integration with Vertex AI embedding models.
-- Metadata filtering (e.g., by label="Merak Group", model="Merak", date range, author).
+- Metadata filtering (e.g., by label="Expert Mailing List", model="Engine", date range, author).
 - Incremental updates (no full re-index every time).
 - Fits the existing Google Cloud + org setup (Cloud Run, Firestore for metadata/sync state).
 - Supports the goal of accurate, sourced technical documentation from unstructured expert data + official manuals.
@@ -241,7 +241,7 @@ flowchart TD
     end
 
     subgraph GoogleAPIs
-        Gmail[Gmail API<br/>Labels: Merak Group, Citroen SM]
+        Gmail[Gmail API<br/>Labels: Expert Mailing List, Technical Discussions]
         Drive[Google Drive API<br/>Input Folder: Car Manuals by Model<br/>Output Folder: Generated Guides]
     end
 
@@ -324,8 +324,8 @@ sequenceDiagram
     participant VS as Vertex AI Vector Search
     participant Gmail as Gmail/Drive APIs
 
-    Grok->>MCP: tools/call get_expert_guidance<br/>(topic="suspension geometry front/rear", label="Merak Group")
-    MCP->>VS: semantic_search(topic, top_k=8, filter={label: "Merak Group"})
+    Grok->>MCP: tools/call get_expert_guidance<br/>(topic="suspension geometry front/rear", label="Expert Mailing List")
+    MCP->>VS: semantic_search(topic, top_k=8, filter={label: "Expert Mailing List"})
     VS-->>MCP: Ranked chunks + metadata (thread_ids, scores, source)
     MCP->>Gmail: get_thread / get_drive_file for top metadata IDs
     Gmail-->>MCP: Full content, attachments, exact text (for specs/tables)

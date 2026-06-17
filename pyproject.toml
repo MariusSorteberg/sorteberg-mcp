@@ -1,6 +1,8 @@
 [project]
-name = "sorteberg-mcp"
+name = "knowledge-forge"
 version = "0.2.0"
+description = "MCP server for turning private email archives and documents into AI-usable expert knowledge with vector search"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.13.1",
@@ -19,5 +21,5 @@ dependencies = [
 ]
 
 [project.scripts]
-sorteberg-mcp = "server:main"
+knowledge-forge = "server:main"
 

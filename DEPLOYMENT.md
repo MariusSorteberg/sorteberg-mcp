@@ -1,6 +1,6 @@
-# Deployment Guide – Sorteberg MCP
+# Deployment Guide – KnowledgeForge
 
-This document explains how to deploy, update, and maintain the Sorteberg MCP on Google Cloud Run.
+This document explains how to deploy, update, and maintain the KnowledgeForge on Google Cloud Run.
 
 ## Prerequisites
 
@@ -51,8 +51,8 @@ Create (or reuse) an OAuth 2.0 Client ID in the Google Cloud Console:
 - Authorized redirect URIs: add both the Cloud Run URL(s) you will use + `/oauth/google/callback`
 
 Example:
-- `https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/oauth/google/callback`
-- `https://sorteberg-mcp-328104254531.europe-west1.run.app/oauth/google/callback`
+- `https://your-knowledgeforge-service.a.run.app/oauth/google/callback`
+- `https://your-knowledgeforge-service.a.run.app/oauth/google/callback`
 
 Put the Client ID and Secret into your environment (see below).
 
@@ -73,7 +73,7 @@ You only need this if you want to use `semantic_search`, `hybrid_search`, and th
 2. **Create a Vector Search Index** (Matching Engine):
    - Go to Vertex AI → Vector Search → Create Index (or use gcloud).
    - Recommended settings for first phase:
-     - Display name: `sorteberg-mcp-emails-drive`
+     - Display name: `knowledge-forge-emails-drive`
      - Dimensions: `768` (text-embedding-004 produces 768-dim vectors)
      - Distance: `Cosine` or `Dot Product`
      - Index update method: **Streaming** (important for incremental upserts)
@@ -85,7 +85,7 @@ You only need this if you want to use `semantic_search`, `hybrid_search`, and th
    gcloud example (approximate):
    ```bash
    gcloud ai indexes create \
-     --display-name=sorteberg-mcp \
+     --display-name=knowledge-forge \
      --dimensions=768 \
      --distance-measure-type=COSINE_DISTANCE \
      --project=YOUR_PROJECT \
@@ -115,7 +115,7 @@ You only need this if you want to use `semantic_search`, `hybrid_search`, and th
 
 6. Redeploy:
    ```bash
-   gcloud run deploy sorteberg-mcp --source=. --region=... --env-vars-file=/tmp/mcp-env-vars.yaml ...
+   gcloud run deploy knowledge-forge --source=. --region=... --env-vars-file=/tmp/mcp-env-vars.yaml ...
    ```
 
 ### Testing the first phase (after deploy + index ready)
@@ -126,11 +126,17 @@ You only need this if you want to use `semantic_search`, `hybrid_search`, and th
     -H "Authorization: Bearer YOUR_AGENT_BEARER_TOKEN"
   ```
 - Or call the tool directly via MCP: `trigger_ingest(days_back=7)`
-- Then try `semantic_search("cylinder head torque Merak")` or `hybrid_search(...)`.
-- Then run a full `get_expert_guidance("suspension geometry Merak")` — it will try vector first.
+- Then try `semantic_search("cylinder head torque")` or `hybrid_search(...)`.
+- Then run a full `get_expert_guidance("suspension geometry")` — it will try vector first.
 
 **Important notes for first phase**:
 - Start with small `days_back` (7-14) so you don't index thousands of messages at once.
+- For full archive coverage (thousands of messages) year-by-year:
+  - Process a full year with `after=2026/01/01&before=2027/01/01&max_messages=80` (repeat the same call until a run returns very low `emails_indexed`).
+  - Then previous year: `after=2025/01/01&before=2026/01/01`, etc.
+  - Use `get_ingest_status()` (MCP tool) or watch "Ingest summary" logs to verify success for that slice.
+- After historical years are done, use `incremental=true` (or the /ingest endpoint with incremental=true) to automatically ingest only new mail since the last successful covered date (watermark is updated automatically on recent runs).
+- The `after` + `before` + `incremental` + `get_ingest_status` were added to support exactly this "date to date then incremental" workflow.
 - The index must be fully created + deployed before queries succeed (can take minutes).
 - If vector calls return empty, the fallback keyword path in `get_expert_guidance` still works.
 - Metadata filtering via restricts is prepared but first-phase queries do additional client-side handling.
@@ -143,7 +149,7 @@ The project is set up for **Cloud Run source deploys** (no separate image buildi
 ### Recommended Command
 
 ```bash
-gcloud run deploy sorteberg-mcp \
+gcloud run deploy knowledge-forge \
   --source=. \
   --region=europe-west1 \
   --allow-unauthenticated \          # or remove for strict IAM
@@ -159,11 +165,11 @@ gcloud run deploy sorteberg-mcp \
 Use an `env-vars-file` (YAML) for most values. Example `/tmp/mcp-env-vars.yaml`:
 
 ```yaml
-ALLOWED_LABELS: "Merak Group,Citroen SM"
+ALLOWED_LABELS: "Expert Mailing List,Technical Discussions"
 AGENT_BEARER_TOKEN: "your-long-random-bearer-token-here"
 GOOGLE_CLIENT_ID: "3281...apps.googleusercontent.com"
 GOOGLE_CLIENT_SECRET: "GOCSPX-..."
-REDIRECT_URI: "https://sorteberg-mcp-62lr3ybf4a-ew.a.run.app/oauth/google/callback"
+REDIRECT_URI: "https://your-knowledgeforge-service.a.run.app/oauth/google/callback"
 
 # Google Drive (optional but recommended for the expert howto workflow)
 DRIVE_INPUT_FOLDER_ID: "your-input-folder-id-for-pdfs-and-sources"
@@ -187,7 +193,7 @@ VECTOR_INDEX_NAME: "projects/vibrant-ring-496211-v5/locations/us-central1/indexe
 To allow anyone with the bearer token:
 
 ```bash
-gcloud run services add-iam-policy-binding sorteberg-mcp \
+gcloud run services add-iam-policy-binding knowledge-forge \
   --region=europe-west1 \
   --member="allUsers" \
   --role="roles/run.invoker"
@@ -208,7 +214,7 @@ Current setup puts secrets in the env-vars-file. Better long-term:
 echo -n "GOCSPX-..." | gcloud secrets create gmail-client-secret --data-file=-
 
 # Deploy referencing the secret
-gcloud run deploy sorteberg-mcp \
+gcloud run deploy knowledge-forge \
   --source=. \
   --region=europe-west1 \
   --allow-unauthenticated \
@@ -224,10 +230,10 @@ Do the same for the `AGENT_BEARER_TOKEN` if you consider it highly sensitive.
 
 ```bash
 # Tail logs
-gcloud run services logs tail sorteberg-mcp --region=europe-west1
+gcloud run services logs read knowledge-forge --region=europe-west1
 
 # View recent logs
-gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=sorteberg-mcp" --limit=50 --format="table(timestamp, severity, textPayload)"
+gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=knowledge-forge" --limit=50 --format="table(timestamp, severity, textPayload)"
 ```
 
 Useful metrics to watch:
@@ -247,7 +253,7 @@ If the refresh token is revoked or expires in a weird way:
 Cloud Run keeps previous revisions. You can roll back instantly in the console or with:
 
 ```bash
-gcloud run services update-traffic sorteberg-mcp \
+gcloud run services update-traffic knowledge-forge \
   --region=europe-west1 \
   --to-revisions=PREVIOUS_REVISION_NAME=100
 ```
@@ -306,4 +312,4 @@ That's it — Cloud Run handles the rest.
 - Set up a custom domain + managed SSL.
 - Add structured logging + export to BigQuery for usage analytics.
 
-Contact the owner (marius@sorteberg.no) or just tell Grok to implement any of the above.
+See the GitHub repository for support or contribute improvements.
