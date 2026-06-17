@@ -686,7 +686,7 @@ def get_full_message(service, msg_id: str, max_body_chars: int = 15000) -> Dict[
         "author": author,
         "subject": subject,
         "date": date,
-        "labels": [lbl.get("name") for lbl in msg_data.get("labelIds", []) if lbl],
+        "labels": msg_data.get("labelIds", []),  # raw label IDs; enrichment happens in search_mailing_list when needed
         "body_text": truncated_body,
         "body_truncated": body_truncated,
         "body_length": len(body_text),
