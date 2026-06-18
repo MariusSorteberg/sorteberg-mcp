@@ -340,15 +340,23 @@ sequenceDiagram
 
 This enhances `get_expert_guidance` (still the primary for the skill) while keeping all existing attribution and full-content tools.
 
-### 7.3 New/Updated Tools (First Phase)
+### 7.3 Vector Search Improvements (Relevance & Author Quality)
 
-- `semantic_search(query, label=None, top_k=8)`: Semantic retrieval using Vertex AI. Returns chunk references (email_*/drive_* ids + scores). Use with get_thread/get_drive_file for full attributed content.
-- `hybrid_search(query, label=None, top_k=8)`: Combines a few vector hits + keyword search_mailing_list results (deduped).
-- Enhanced `get_expert_guidance`: Starts with vector semantic recall, then falls back/enriches with keyword + full thread fetch.
-- `trigger_ingest(manual=True, days_back=7)` + protected `POST /ingest`: Manual indexing trigger. Chunks with bias toward keeping tables/paragraphs together.
-- Ingestion also writes `vector_last_ingest` to Firestore owner doc.
+- **Task-specific embeddings**: Documents use `RETRIEVAL_DOCUMENT` + title; queries use `RETRIEVAL_QUERY`. This is the recommended way to use text-embedding-005 for retrieval.
+- **Context injection into chunks**: Every embedded chunk includes `Author: ... (trusted expert if applicable)\nDate: ...\nSubject: ...` so vectors capture provenance and author signal.
+- **Query expansion**: Topics are lightly rewritten (adds "technical advice", "procedure", "specs", etc.) before vector embedding for better recall on mailing-list style queries.
+- **Hybrid search**: Uses Reciprocal Rank Fusion (RRF) instead of naive dedup. Trusted authors get explicit score boost.
+- **Trusted authors**: Config via `TRUSTED_AUTHORS` env (e.g. "John Titus,Darren Kriticos"). Injected in chunks + boosted in `hybrid_search` and `get_expert_guidance`.
+- Enhanced `get_expert_guidance`: Vector-first (expanded query), then keyword, dedup, trusted-author boost + full provenance.
+- `semantic_search` and `hybrid_search` now return better-ranked, attributable results.
 
-The skill.md will be updated to instruct starting with semantic tools for relevant context before full synthesis.
+Tools:
+- `semantic_search(query, label=None, top_k=8)`
+- `hybrid_search(query, label=None, top_k=8)`: RRF + author boosting.
+- `get_expert_guidance`: Now produces higher quality vector + keyword mix for how-tos.
+- `trigger_ingest(...)`: Re-run after code changes to re-embed with context.
+
+Re-embedding existing data is recommended after these changes for full benefit.
 
 ### Integration with Existing Components
 

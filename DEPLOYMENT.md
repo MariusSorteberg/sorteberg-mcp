@@ -181,6 +181,9 @@ VERTEX_PROJECT: "vibrant-ring-496211-v5"
 VERTEX_LOCATION: "us-central1"
 VECTOR_INDEX_NAME: "projects/vibrant-ring-496211-v5/locations/us-central1/indexes/REPLACE_ME"
 # VECTOR_INDEX_ENDPOINT: "..."   # set after you deploy the index to an endpoint (recommended)
+
+# Trusted authors for quality boosting (injected into vector chunks + score boost in hybrid/guidance)
+TRUSTED_AUTHORS: "John Titus,Darren Kriticos"
 ```
 
 **Security note**: The Gmail client secret is sensitive. For production you should move it to Secret Manager and use `--set-secrets`.
@@ -202,6 +205,11 @@ gcloud run services add-iam-policy-binding knowledge-forge \
 ## Updating the Service
 
 Just run the same `gcloud run deploy ... --source=.` command again. It will create a new revision and (by default) shift 100% traffic to it.
+
+**After vector improvements** (task-type embeddings, author context injection, query expansion, RRF hybrid, trusted author boosting):
+- Re-deploy the service.
+- Re-run `trigger_ingest` (or long date-range loops) to re-embed data with the new chunking + context. This is required to get the quality/author signals into the vectors.
+- Use `hybrid_search` or `get_expert_guidance` for best results; they now prefer trusted experts like John Titus.
 
 You can also do canary deploys with `--no-traffic` + traffic splitting if desired.
 

@@ -75,6 +75,13 @@ VECTOR_DEPLOYED_INDEX_ID = os.getenv("VECTOR_DEPLOYED_INDEX_ID", "knowledge_forg
 # For embeddings model
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
 
+# Authors known to provide high-quality, reliable technical information.
+# Their posts will be injected with context during embedding and boosted in hybrid/guidance results.
+TRUSTED_AUTHORS = [
+    a.strip() for a in os.getenv("TRUSTED_AUTHORS", "John Titus,Darren Kriticos").split(",")
+    if a.strip()
+]
+
 # Firestore storage for the Gmail owner tokens (persistent, survives restarts)
 TOKEN_COLLECTION = "mcp_config"
 TOKEN_DOCUMENT = "gmail_owner"
@@ -285,8 +292,17 @@ def _init_vertex():
         vertexai.init(project=VERTEX_PROJECT, location=VERTEX_LOCATION)
 
 
-def _get_embedding(text: str) -> List[float]:
-    """Generate embedding using Vertex AI text-embedding-005 (or configured model)."""
+def _get_embedding(
+    text: str,
+    task_type: str = "RETRIEVAL_DOCUMENT",
+    title: Optional[str] = None,
+) -> List[float]:
+    """Generate embedding using Vertex AI text-embedding-005 (or configured model).
+
+    Use task_type="RETRIEVAL_DOCUMENT" (with optional title) when embedding chunks during ingest.
+    Use task_type="RETRIEVAL_QUERY" when embedding user queries for search.
+    This greatly improves relevance for asymmetric retrieval tasks.
+    """
     if not VERTEX_PROJECT or not VECTOR_INDEX_NAME:
         raise HTTPException(500, "Vertex AI Vector Search not configured (set VERTEX_PROJECT and VECTOR_INDEX_NAME)")
     _init_vertex()
@@ -294,44 +310,60 @@ def _get_embedding(text: str) -> List[float]:
     model = TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL)
     # Trim aggressively; embeddings have input limits
     safe_text = (text or "")[:10000]
-    embeddings = model.get_embeddings([safe_text])
+    kwargs = {"task_type": task_type}
+    if title:
+        kwargs["title"] = title
+    embeddings = model.get_embeddings([safe_text], **kwargs)
     return embeddings[0].values
 
 
-def _chunk_text(text: str, base_meta: Dict[str, Any], max_chars: int = 5500) -> List[Dict[str, Any]]:
+def _chunk_text(
+    text: str,
+    base_meta: Dict[str, Any],
+    max_chars: int = 4000,
+    context_prefix: str = "",
+) -> List[Dict[str, Any]]:
     """Split text into embedding-friendly chunks.
     Tries to keep paragraphs and especially table-like blocks together for specs/torques.
-    Returns list of {"text": chunk, "meta": meta_with_chunk_index}
+    Adds overlap and optional context_prefix (author, subject, date) to every chunk
+    so that vector embeddings capture provenance and quality signals.
     """
     text = (text or "").strip()
     if not text:
         return []
-    if len(text) <= max_chars:
+
+    # Prepend context so every chunk knows who wrote it and the context
+    if context_prefix:
+        full_text = f"{context_prefix}\n\n{text}"
+    else:
+        full_text = text
+
+    if len(full_text) <= max_chars:
         m = dict(base_meta)
         m["chunk_index"] = 0
-        return [{"text": text, "meta": m}]
+        return [{"text": full_text, "meta": m}]
 
     # Prefer splitting on blank lines (paragraphs). Keep large table blocks intact when possible.
-    paragraphs = re.split(r'\n\s*\n+', text)
+    paragraphs = re.split(r'\n\s*\n+', full_text)
     chunks: List[str] = []
     current = ""
+    overlap = 400  # characters of overlap for continuity
 
     for p in paragraphs:
         p = p.strip()
         if not p:
             continue
-        # If adding keeps us under limit, append
         if len(current) + len(p) + 2 <= max_chars:
             current = (current + "\n\n" + p).strip()
         else:
             if current:
                 chunks.append(current)
             if len(p) > max_chars:
-                # Hard split huge paragraph (rare for email, more for pasted tables)
                 start = 0
                 while start < len(p):
-                    chunks.append(p[start:start + max_chars])
-                    start += max_chars - 300  # small overlap
+                    chunk = p[start : start + max_chars]
+                    chunks.append(chunk)
+                    start += max_chars - overlap
             else:
                 current = p
     if current:
@@ -375,13 +407,39 @@ def _upsert_chunks(chunks: List[Dict[str, Any]]):
         logger.info(f"Upserted {len(datapoints)} chunks to Vector Search")
 
 
+def _expand_query_for_vector(query: str) -> str:
+    """Lightweight query expansion/rewriting to improve vector recall.
+    Technical mailing list topics often benefit from adding domain terms.
+    """
+    q = query.strip()
+    if not q:
+        return q
+    expansions = [
+        "technical advice",
+        "procedure",
+        "how to",
+        "tips",
+        "solution",
+        "expert discussion",
+        "specs",
+    ]
+    # Avoid duplicating if already present
+    expanded = q
+    lower = q.lower()
+    for exp in expansions:
+        if exp not in lower:
+            expanded += f" {exp}"
+    return expanded
+
+
 def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Internal semantic search impl. Returns [{'id':, 'score':, 'metadata': {...}}]"""
     if not VECTOR_INDEX_NAME:
         return []
     import google.cloud.aiplatform as aiplatform
     _init_vertex()
-    embedding = _get_embedding(query)
+    expanded_query = _expand_query_for_vector(query)
+    embedding = _get_embedding(expanded_query, task_type="RETRIEVAL_QUERY")
 
     raw_results = []
     try:
@@ -438,6 +496,79 @@ def _semantic_search_impl(query: str, top_k: int = 8, filters: Optional[Dict[str
     # Limit and normalize
     results = raw_results[:top_k]
     return results
+
+
+def _reciprocal_rank_fusion(
+    result_lists: List[List[Dict[str, Any]]], k: int = 60
+) -> List[Dict[str, Any]]:
+    """Simple Reciprocal Rank Fusion for combining vector and keyword results."""
+    scores: Dict[str, float] = {}
+    id_to_item: Dict[str, Dict[str, Any]] = {}
+
+    for results in result_lists:
+        for rank, item in enumerate(results, 1):
+            # Use a stable key: prefer thread/message id
+            key = item.get("id") or item.get("thread_id") or str(item)
+            if key not in id_to_item:
+                id_to_item[key] = item
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+
+    # Sort by fused score desc
+    sorted_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
+    fused = []
+    for key in sorted_keys:
+        item = dict(id_to_item[key])
+        item["fused_score"] = scores[key]
+        fused.append(item)
+    return fused
+
+
+def _boost_trusted_authors(items: List[Dict[str, Any]], boost: float = 0.25) -> List[Dict[str, Any]]:
+    """Boost items that mention or are authored by trusted experts."""
+    boosted = []
+    for item in items:
+        score = item.get("fused_score") or item.get("score") or 0.0
+        author = ""
+        data = item.get("data") or item
+        if isinstance(data, dict):
+            auth = data.get("author") or {}
+            if isinstance(auth, dict):
+                author = auth.get("name", "") or auth.get("email", "")
+            else:
+                author = str(auth)
+        if any(ta.lower() in author.lower() for ta in TRUSTED_AUTHORS):
+            score += boost
+        new_item = dict(item)
+        new_item["score"] = score
+        boosted.append(new_item)
+    # Re-sort after boost
+    boosted.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return boosted
+
+
+def _boost_trusted_authors_in_threads(threads: List[Dict[str, Any]], boost: float = 0.3) -> List[Dict[str, Any]]:
+    """Boost threads in get_expert_guidance that contain posts from trusted authors."""
+    for t in threads:
+        messages = t.get("messages", []) or []
+        has_trusted = False
+        for msg in messages:
+            auth = msg.get("author") or {}
+            name = ""
+            if isinstance(auth, dict):
+                name = auth.get("name", "") or auth.get("email", "")
+            else:
+                name = str(auth)
+            if any(ta.lower() in name.lower() for ta in TRUSTED_AUTHORS):
+                has_trusted = True
+                break
+        if has_trusted:
+            current = t.get("score", 0) or 0
+            t["score"] = current + boost
+            t["boosted_for_trusted_author"] = True
+    # Sort by score if present, otherwise leave order (vector first is still good)
+    if any("score" in t for t in threads):
+        threads.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return threads
 
 
 def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optional[str] = None, max_messages: int = 50, before: Optional[str] = None, after: Optional[str] = None, incremental: bool = False) -> Dict[str, Any]:
@@ -543,22 +674,37 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optiona
                         seen.add(mid)
                         try:
                             full = get_full_message(service, mid, max_body_chars=0)
-                            text = full.get("body_text", "") or full.get("snippet", "")
-                            if not text or len(text) < 80:
-                                processed += 1  # advance even if skipped to not loop forever on bad
+                            body_text = full.get("body_text", "") or full.get("snippet", "")
+                            if not body_text or len(body_text) < 80:
+                                processed += 1
                                 continue
 
+                            author = (full.get("author") or {}).get("name", "")
+                            date = full.get("date", "")
+                            subject = full.get("subject", "")
                             base_meta = {
                                 "label": lbl,
                                 "source_type": "email",
                                 "message_id": mid,
                                 "thread_id": full.get("threadId", ""),
-                                "author": (full.get("author") or {}).get("name", ""),
-                                "date": full.get("date", ""),
+                                "author": author,
+                                "date": date,
+                                "subject": subject,
                             }
-                            chunks = _chunk_text(text, base_meta)
+
+                            # Inject author + context into the text so embeddings capture quality signals
+                            # (e.g. "Author: John Titus" makes high-value content more distinctive)
+                            context_prefix = f"Author: {author}\nDate: {date}\nSubject: {subject}"
+                            if author in TRUSTED_AUTHORS:
+                                context_prefix = f"Author: {author} (trusted expert)\nDate: {date}\nSubject: {subject}"
+
+                            chunks = _chunk_text(body_text, base_meta, context_prefix=context_prefix)
                             for ch in chunks:
-                                emb = _get_embedding(ch["text"])
+                                emb = _get_embedding(
+                                    ch["text"],
+                                    task_type="RETRIEVAL_DOCUMENT",
+                                    title=subject or author,
+                                )
                                 th = full.get("threadId", "") or "t"
                                 cid = f"email_{th}_{mid}_{ch['meta'].get('chunk_index', 0)}"
                                 _upsert_chunks([{"id": cid, "embedding": emb, "metadata": ch["meta"]}])
@@ -608,17 +754,24 @@ def _trigger_ingest_impl(manual: bool = True, days_back: int = 7, label: Optiona
                     text = file_data.get("text_content") or ""
                     if not text or len(text) < 120:
                         continue
+                    fname = f.get("name", "")
+                    model_folder = f.get("_parent_folder", "")
                     base_meta = {
                         "source_type": "drive",
                         "file_id": f["id"],
-                        "name": f.get("name", ""),
+                        "name": fname,
                         "mime": f.get("mimeType", ""),
                         "modified": f.get("modifiedTime", ""),
-                        "model_folder": f.get("_parent_folder", ""),
+                        "model_folder": model_folder,
                     }
-                    chunks = _chunk_text(text, base_meta)
+                    context_prefix = f"Source: Drive document\nFile: {fname}\nFolder: {model_folder}"
+                    chunks = _chunk_text(text, base_meta, context_prefix=context_prefix)
                     for ch in chunks:
-                        emb = _get_embedding(ch["text"])
+                        emb = _get_embedding(
+                            ch["text"],
+                            task_type="RETRIEVAL_DOCUMENT",
+                            title=fname,
+                        )
                         cid = f"drive_{f['id']}_{ch['meta'].get('chunk_index', 0)}"
                         _upsert_chunks([{"id": cid, "embedding": emb, "metadata": ch["meta"]}])
                         summary["chunks"] += 1
@@ -1147,8 +1300,10 @@ def get_expert_guidance(
     seen_thread_ids = set()
 
     # Start with semantic/vector search (Vertex AI) for better relevance
+    # Use expanded query for stronger recall on technical topics
+    expanded_topic = _expand_query_for_vector(topic)
     try:
-        vec_results = _semantic_search_impl(query=topic, top_k=max(5, max_threads))
+        vec_results = _semantic_search_impl(query=expanded_topic, top_k=max(5, max_threads))
         for vr in vec_results:
             rid = vr.get("id", "")
             # Parse source from chunk id (email_<msg>_<n> or drive_...)
@@ -1244,6 +1399,9 @@ def get_expert_guidance(
     # Compute provenance summary
     vector_count = sum(1 for t in unique_threads if t.get("source") == "vector")
     keyword_count = sum(1 for t in unique_threads if t.get("source") == "keyword")
+
+    # Boost threads that contain contributions from trusted high-quality authors
+    unique_threads = _boost_trusted_authors_in_threads(unique_threads)
 
     return {
         "topic": topic,
@@ -1585,7 +1743,7 @@ def semantic_search(query: str, top_k: int = 8, label: Optional[str] = None) -> 
 @mcp.tool()
 def hybrid_search(query: str, top_k: int = 8, label: Optional[str] = None) -> Dict[str, Any]:
     """Hybrid retrieval: vector semantic results + keyword search results.
-    Deduplicates and returns a combined context list. First-phase implementation.
+    Uses Reciprocal Rank Fusion + trusted author boosting for better relevance.
     """
     vec = []
     kw = []
@@ -1599,20 +1757,37 @@ def hybrid_search(query: str, top_k: int = 8, label: Optional[str] = None) -> Di
     except Exception as e:
         logger.warning(f"hybrid kw part failed: {e}")
 
-    # Simple dedup by rough id
-    seen = set()
-    combined = []
-    for v in vec:
-        vid = v.get("id", "")
-        if vid and vid not in seen:
-            seen.add(vid)
-            combined.append({"type": "vector", "id": vid, "score": v.get("score"), "source": "semantic"})
+    # Prepare lists for RRF
+    vec_for_fusion = [{"id": v.get("id"), "score": v.get("score", 0)} for v in vec]
+    kw_for_fusion = []
     for item in (kw or []):
         if isinstance(item, dict):
             mid = item.get("id") or item.get("threadId")
-            if mid and mid not in seen:
-                seen.add(mid)
-                combined.append({"type": "keyword", "id": mid, "data": item, "source": "keyword"})
+            kw_for_fusion.append({"id": mid, "data": item})
+
+    fused = _reciprocal_rank_fusion([vec_for_fusion, kw_for_fusion])
+
+    # Convert back and add type/source
+    combined = []
+    for item in fused:
+        if "data" in item:
+            combined.append({
+                "type": "keyword",
+                "id": item["id"],
+                "data": item.get("data"),
+                "score": item.get("fused_score", 0),
+                "source": "keyword",
+            })
+        else:
+            combined.append({
+                "type": "vector",
+                "id": item["id"],
+                "score": item.get("fused_score", 0),
+                "source": "semantic",
+            })
+
+    # Boost trusted authors (John Titus etc.)
+    combined = _boost_trusted_authors(combined)
 
     return {
         "query": query,
@@ -1620,7 +1795,7 @@ def hybrid_search(query: str, top_k: int = 8, label: Optional[str] = None) -> Di
         "vector_hits": len(vec),
         "keyword_hits": len([c for c in combined if c["type"] == "keyword"]),
         "combined": combined[:top_k],
-        "note": "Use the ids to fetch full content via get_thread/get_message/get_drive_file."
+        "note": "Use the ids to fetch full content via get_thread/get_message/get_drive_file. Trusted authors are boosted."
     }
 
 

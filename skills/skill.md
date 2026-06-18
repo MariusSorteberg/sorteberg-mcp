@@ -35,7 +35,7 @@ Trigger phrase examples (you recognize these automatically):
    - `topic`: the exact job or subsystem (e.g. "engine overhaul", "bottom end rebuild", "gearbox synchros", "headlight hydraulics", "suspension refresh")
    - `label`: the name of your expert mailing list label (e.g. "Expert Mailing List"). Use the exact label name configured in your KnowledgeForge deployment.
    - `max_threads`: 5–8 for major jobs.
-   - Note: `get_expert_guidance` now starts with semantic/vector search (Vertex AI) over the indexed archive for better recall, then enriches with keyword tools + full content.
+   - Note: `get_expert_guidance` uses hybrid vector search (RETRIEVAL_QUERY embeddings + query expansion) + keyword, with trusted-author context injection during ingest and post-retrieval boosting (e.g. John Titus content ranks higher). Results include provenance (vector vs keyword).
 
 2. **Deep-dive the best threads** using `get_thread(thread_id, max_messages=20–30)` on the highest-value thread_ids returned.
 

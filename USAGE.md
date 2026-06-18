@@ -27,7 +27,7 @@ Once connected you should see tools including:
 ### Best Starting Tool
 Use **`get_expert_guidance`** first. It is specifically designed for this use case.
 
-**Example prompt:**
+**Example prompt:** (get_expert_guidance now benefits from improved vector recall with author context and boosting)
 ```
 Use get_expert_guidance on your expert mailing list label with the topic "overhaul the engine" (max_threads=6). 
 Then use the returned threads to create a complete, well-structured step-by-step guide for someone doing a full engine overhaul. 

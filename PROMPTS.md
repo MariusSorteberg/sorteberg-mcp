@@ -20,6 +20,8 @@ Use the get_expert_guidance tool with:
 - label: "Expert Mailing List"
 - max_threads: 6
 
+(Note: Vector side now uses task-specific embeddings, author context, and query expansion; trusted experts are boosted.)
+
 Then, using only the threads and messages returned (and get_thread_attachments + get_attachment where visuals or PDFs are present, plus include_full_bodies where long detailed posts are involved), produce a complete, well-structured technical guide.
 
 Requirements:

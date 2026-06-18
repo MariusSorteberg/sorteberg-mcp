@@ -11,7 +11,8 @@ Grok (or other MCP clients) can use the tools to search expert discussions from 
 - **Attachment support** — list and retrieve files (with PDF text extraction).
 - **Link following** — extract and fetch content from URLs mentioned in emails.
 - **Author attribution** — every result includes clear expert name and email.
-- **High-level guidance tool** — `get_expert_guidance` is optimized for generating complete how-to writeups.
+- **High-level guidance tool** — `get_expert_guidance` is optimized for generating complete how-to writeups. Uses hybrid vector (with task-specific embeddings + author context) + keyword search.
+- **Author quality boosting** — Trusted experts (e.g. John Titus) have their content context-injected into embeddings and results are boosted in hybrid/guidance for higher relevance.
 - Secure owner Gmail OAuth (tokens stored in Firestore, never exposed to the AI client).
 - Designed for Google Cloud Run + easy connection to the Grok web client.
 
@@ -34,7 +35,8 @@ Grok will use the tools (`search_mailing_list`, `get_thread`, `get_attachment`, 
 - `get_thread_attachments(thread_id)` — Collects *all* photos, diagrams, and PDFs from an entire thread with author/message context. Ideal for richly illustrated guides.
 - `extract_links` / `fetch_link` — Pull and retrieve content from URLs. `fetch_link` extracts text from PDF links (factory manuals, torque charts).
 - `search_by_author` — Find contributions from specific experts.
-- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Smart search (vector + keyword) + thread enrichment with attribution (pulls fuller bodies).
+- `get_expert_guidance(topic, label, max_threads)` — **Recommended starting point** for generating full how-tos. Hybrid vector (RETRIEVAL_DOCUMENT/QUERY task types, author/subject context injected) + keyword, with trusted-author boosting + provenance.
+- `semantic_search` / `hybrid_search` — Direct vector (or fused RRF hybrid) search over embeddings. Hybrid uses Reciprocal Rank Fusion and author boosting.
 - `list_input_manuals(model=None)` — List the Drive input folder (technical manuals/docs). Subfolders may be sorted by model or category. Pass `model="Engine"` to list inside a specific folder.
 - `save_to_guides(title, content, as_pdf=True)` — Recommended convenience wrapper to publish the howto PDF/.md to the output folder. Filenames are timestamped (e.g. Title_2026-06-17_12-34-56.pdf) to prevent duplicates.
 - `list_drive_files` / `get_drive_file` / `save_howto_to_drive` — Lower-level versions (still available).
@@ -112,7 +114,8 @@ See `ARCHITECTURE.md` for a deeper dive.
 This project was built iteratively with Grok to solve a very specific need: making expert knowledge from old mailing lists usable again.
 
 Common next improvements people ask for:
-- Vector embeddings + semantic search over the archive (Vertex AI Vector Search layer in progress - see ARCHITECTURE.md)
+- Vector search improvements (task-specific embeddings, context injection for authors like John Titus, RRF hybrid, query expansion — implemented)
+- Re-embedding existing data with improved chunking for better relevance
 - Automatic summarization / knowledge base building
 - Image description for photos attached to emails
 - Exporting generated how-tos back as nice PDFs or GitHub wiki pages
